@@ -1,0 +1,53 @@
+/**
+ * Seed data for the mock vending API.
+ * All made-up data (exercise ground rules: test keys and made-up data only).
+ * Amounts are in kobo (NGN subunit), matching Paystack's convention: NGN 100 = 10000.
+ */
+
+export function buildSeed() {
+  return {
+    wallet: {
+      currency: 'NGN',
+      // Starts EMPTY on purpose: the first act of any demo is funding it,
+      // which is the real sequence for a biller wallet (and shows the
+      // insufficient-balance path without contriving it).
+      balance: 0,
+      low_balance_threshold: 500000, // NGN 5,000.00
+      account_number: '1234567890', // made-up biller account for bank-transfer funding
+      bank: 'Sterling Bank (test)'
+    },
+    meters: [
+      {
+        meter_number: '45123456789',
+        disco: 'IKEDC',
+        type: 'prepaid',
+        owner_name: 'BLOSSOM BY TC LIMITED',
+        available: true
+      },
+      {
+        meter_number: '87654321098',
+        disco: 'IKEDC',
+        type: 'postpaid',
+        owner_name: 'BLOSSOM BY TC LIMITED',
+        available: true
+      },
+      {
+        // Deliberately unavailable disco for the failure-path demo (field notes / recording).
+        meter_number: '11223344556',
+        disco: 'EKEDC',
+        type: 'prepaid',
+        owner_name: 'BLOSSOM BY TC LIMITED',
+        available: false
+      }
+    ],
+    phones: [
+      { phone_number: '08031234567', network: 'MTN', valid: true },
+      { phone_number: '08051234567', network: 'GLO', valid: true },
+      { phone_number: '08091234567', network: 'AIRTEL', valid: true },
+      { phone_number: '07000000000', network: null, valid: false }
+    ],
+    purchases: [],
+    incoming: [], // recorded wallet credits (bank transfer or Paystack-funded)
+    idempotency: {}
+  };
+}

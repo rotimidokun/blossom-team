@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Runtime state (seed data lives in src/seed.js; db.json is generated)
+vending-api/data/
+
+# Environment / secrets
+.env
+.env.local
+vending-api/.env
+
+# OS / editor
+.DS_Store
+Thumbs.db

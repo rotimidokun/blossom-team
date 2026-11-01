@@ -1,0 +1,343 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Blossom Vending API",
+    "description": "Mock vending API for Blossom by TC: airtime and electricity purchases with a validate-then-confirm-then-purchase flow. Built for the TSG Labs Chord exercise. Standards mirror Paystack ({status,message,data} envelope, kobo amounts, bearer auth) and Chord (versioned /v1 paths, machine-readable error codes). All data is made up; no real money moves.",
+    "version": "1.0.0"
+  },
+  "servers": [{ "url": "http://localhost:3000", "description": "Local development" }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/health": {
+      "get": {
+        "security": [],
+        "summary": "Liveness check (no auth)",
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }
+        }
+      }
+    },
+    "/v1/wallet": {
+      "get": {
+        "summary": "Check vending wallet balance",
+        "responses": {
+          "200": {
+            "description": "Balance retrieved",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/wallet/incoming": {
+      "post": {
+        "summary": "Record a bank-transfer top-up of the vending wallet",
+        "description": "The owner sends money to the made-up biller account; this records the credit against a reference so the same transfer can never be counted twice (409 IDEMPOTENT_REPLAY).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["amount", "reference"],
+                "properties": {
+                  "amount": { "type": "integer", "description": "Kobo (NGN x100)", "example": 5000000 },
+                  "reference": { "type": "string", "example": "TRF-bank-001" },
+                  "source": { "type": "string", "enum": ["bank_transfer"], "default": "bank_transfer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Wallet funded",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "409": { "description": "IDEMPOTENT_REPLAY — this reference was already applied", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/wallet/paystack-funded": {
+      "post": {
+        "summary": "Record a Paystack-funded top-up of the vending wallet",
+        "description": "Called after a real Paystack test transfer (POST /transfer from src/paystack.js) succeeded, so the wallet credit is traced to a Paystack reference.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["amount", "paystack_reference"],
+                "properties": {
+                  "amount": { "type": "integer", "description": "Kobo (NGN x100)", "example": 2000000 },
+                  "paystack_reference": { "type": "string", "example": "PSK-test-777" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Wallet funded",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "409": { "description": "IDEMPOTENT_REPLAY — this reference was already applied", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/validate/meter": {
+      "post": {
+        "summary": "Validate a meter number and return the registered owner",
+        "description": "Always call this before a purchase. The owner name it returns must be shown to the human for confirmation.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["meter_number", "disco"],
+                "properties": {
+                  "meter_number": { "type": "string", "example": "45123456789" },
+                  "disco": { "type": "string", "example": "IKEDC" },
+                  "type": { "type": "string", "enum": ["prepaid", "postpaid"], "example": "prepaid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Meter validated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/validate/phone": {
+      "post": {
+        "summary": "Validate a phone number and return its network",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["phone_number"],
+                "properties": {
+                  "phone_number": { "type": "string", "example": "08031234567" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Phone validated",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/purchases/electricity": {
+      "post": {
+        "summary": "Buy an electricity token",
+        "description": "Debits the wallet and returns a token. Send Idempotency-Key so a retry can never double-buy.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["meter_number", "disco", "amount"],
+                "properties": {
+                  "meter_number": { "type": "string", "example": "45123456789" },
+                  "disco": { "type": "string", "example": "IKEDC" },
+                  "type": { "type": "string", "enum": ["prepaid", "postpaid"] },
+                  "amount": { "type": "integer", "description": "Kobo (NGN x100)", "example": 1000000 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Electricity purchased (or idempotent replay)",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "402": { "$ref": "#/components/responses/PaymentRequired" },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/purchases/airtime": {
+      "post": {
+        "summary": "Buy airtime for a line",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["phone_number", "amount"],
+                "properties": {
+                  "phone_number": { "type": "string", "example": "08031234567" },
+                  "network": { "type": "string", "enum": ["MTN", "GLO", "AIRTEL"], "description": "Optional cross-check against the validated network" },
+                  "amount": { "type": "integer", "description": "Kobo (NGN x100)", "example": 200000 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Airtime purchased (or idempotent replay)",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "402": { "$ref": "#/components/responses/PaymentRequired" },
+          "422": { "$ref": "#/components/responses/Unprocessable" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/purchases": {
+      "get": {
+        "summary": "List purchases",
+        "responses": {
+          "200": {
+            "description": "Purchases retrieved",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/purchases/{id}": {
+      "get": {
+        "summary": "Fetch a purchase receipt by id or reference",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" }, "example": "pur_1a2b3c4d" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Purchase retrieved",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/reset": {
+      "post": {
+        "summary": "Reset the database to seed state (test only, disabled when NODE_ENV=production)",
+        "responses": {
+          "200": {
+            "description": "Reset",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+          },
+          "403": { "description": "FORBIDDEN in production" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "description": "Authorization: Bearer <VENDING_API_KEY>" }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Client-generated unique key. Repeating a request with the same key returns the original result without re-buying."
+      }
+    },
+    "schemas": {
+      "Envelope": {
+        "type": "object",
+        "required": ["status", "message", "data"],
+        "properties": {
+          "status": { "type": "boolean", "example": true },
+          "message": { "type": "string", "example": "Electricity purchased" },
+          "data": { "type": "object" }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "boolean", "example": false },
+          "message": { "type": "string", "example": "Meter number is not valid for this disco" },
+          "data": {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "UNAUTHORIZED",
+                      "INVALID_METER",
+                      "INVALID_PHONE",
+                      "INSUFFICIENT_WALLET",
+                      "VALIDATION_FAILED",
+                      "DISCO_UNAVAILABLE",
+                      "NOT_FOUND",
+                      "FORBIDDEN",
+                      "IDEMPOTENT_REPLAY"
+                    ]
+                  },
+                  "status": { "type": "integer" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid API key (UNAUTHORIZED)",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "BadRequest": {
+        "description": "INVALID_METER / INVALID_PHONE / VALIDATION_FAILED",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "PaymentRequired": {
+        "description": "INSUFFICIENT_WALLET — wallet balance below the purchase amount",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "Unprocessable": {
+        "description": "VALIDATION_FAILED — missing or malformed fields",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "NotFound": {
+        "description": "NOT_FOUND",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "ServiceUnavailable": {
+        "description": "DISCO_UNAVAILABLE — upstream distribution company outage (simulated)",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      }
+    }
+  }
+}
