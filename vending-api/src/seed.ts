@@ -3,8 +3,9 @@
  * All made-up data (exercise ground rules: test keys and made-up data only).
  * Amounts are in kobo (NGN subunit), matching Paystack's convention: NGN 100 = 10000.
  */
+import type { Db } from './types.js';
 
-export function buildSeed() {
+export function buildSeed(): Db {
   return {
     wallet: {
       currency: 'NGN',

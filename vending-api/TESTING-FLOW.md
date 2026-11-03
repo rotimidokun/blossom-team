@@ -88,7 +88,7 @@ Expected: `"balance": 5000000` (₦50,000).
 > **Why not the Paystack pull path?** `POST /transfer` is blocked on our test account —
 > `transfer_unavailable`: *"You cannot initiate third party payouts as a starter business."*
 > Paystack requires a verified (Registered) business for payouts, including in test mode.
-> The pull path (`src/paystack.js` + `/v1/wallet/paystack-funded`) stays in the codebase as
+> The pull path (`src/paystack.ts` + `/v1/wallet/paystack-funded`) stays in the codebase as
 > the go-live upgrade. See `field-notes.md` for the full note.
 
 ---

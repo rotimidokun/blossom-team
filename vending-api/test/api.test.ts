@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Server } from 'node:http';
 
 // Isolate test data BEFORE importing app modules (store reads env at import time).
 process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'vending-')), 'db.json');
@@ -13,20 +14,30 @@ process.env.MAE_MOCK = '1';
 delete process.env.GEMINI_API_KEY;
 delete process.env.OPENROUTER_API_KEY;
 
+// Dynamic import on purpose: the env assignments above must run first.
 const { startServer } = await import('../src/server.js');
 
-let server;
-let base;
+let server: Server;
+let base = '';
 
 before(async () => {
   server = await startServer(0); // ephemeral port
-  base = `http://localhost:${server.address().port}`;
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+  base = `http://localhost:${port}`;
 });
 
 after(() => server.close());
 
-async function call(method, path, { body, idempotencyKey } = {}) {
-  const headers = { Authorization: 'Bearer test_vending_key' };
+interface CallOptions {
+  body?: unknown;
+  idempotencyKey?: string;
+}
+
+// `json` is typed any on purpose: assertions read many shapes off one payload,
+// and the response envelope is validated field-by-field by each test.
+async function call(method: string, path: string, { body, idempotencyKey }: CallOptions = {}) {
+  const headers: Record<string, string> = { Authorization: 'Bearer test_vending_key' };
   if (body) headers['Content-Type'] = 'application/json';
   if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
   const res = await fetch(base + path, {
@@ -34,7 +45,7 @@ async function call(method, path, { body, idempotencyKey } = {}) {
     headers,
     body: body ? JSON.stringify(body) : undefined
   });
-  return { http: res.status, json: await res.json() };
+  return { http: res.status, json: (await res.json()) as any };
 }
 
 const wallet = () => call('GET', '/v1/wallet');
@@ -44,14 +55,14 @@ const wallet = () => call('GET', '/v1/wallet');
 test('health endpoint needs no auth', async () => {
   const res = await fetch(base + '/health');
   assert.equal(res.status, 200);
-  const json = await res.json();
+  const json = (await res.json()) as any;
   assert.equal(json.status, true);
 });
 
 test('missing bearer token is 401 UNAUTHORIZED', async () => {
   const res = await fetch(base + '/v1/wallet');
   assert.equal(res.status, 401);
-  const json = await res.json();
+  const json = (await res.json()) as any;
   assert.equal(json.status, false);
   assert.equal(json.data.error.code, 'UNAUTHORIZED');
 });
@@ -261,7 +272,7 @@ test('generated image is served at /images (no auth)', async () => {
   });
   const res = await fetch(base + created.json.data.image_url);
   assert.equal(res.status, 200);
-  assert.match(res.headers.get('content-type'), /image/);
+  assert.match(res.headers.get('content-type') || '', /image/);
 });
 
 test('generate without brief is 422 VALIDATION_FAILED', async () => {
@@ -286,9 +297,9 @@ test('approval queue filters by status=pending', async () => {
   });
   const queue = await call('GET', '/v1/designs?status=pending');
   assert.equal(queue.http, 200);
-  const ids = queue.json.data.designs.map((d) => d.id);
+  const ids = queue.json.data.designs.map((d: any) => d.id);
   assert.ok(ids.includes(created.json.data.id));
-  assert.ok(queue.json.data.designs.every((d) => d.status === 'pending'));
+  assert.ok(queue.json.data.designs.every((d: any) => d.status === 'pending'));
 });
 
 test('approve flips pending -> approved; approving twice is 409 INVALID_STATE', async () => {
@@ -320,7 +331,7 @@ test('reject records a reason; rejected design leaves the pending queue', async 
   assert.equal(rejected.json.data.rejection_reason, 'Colors off-brand');
 
   const queue = await call('GET', '/v1/designs?status=pending');
-  assert.ok(!queue.json.data.designs.some((d) => d.id === id));
+  assert.ok(!queue.json.data.designs.some((d: any) => d.id === id));
 });
 
 test('unknown design id is 404 NOT_FOUND', async () => {

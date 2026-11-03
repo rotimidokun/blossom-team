@@ -23,40 +23,62 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { DesignKind, ErrorCode, GeneratedImage, ImageGenError } from './types.js';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
+/** Providers that can actually be called (mock is handled before this point). */
+type ProviderName = 'gemini' | 'openrouter';
+
+interface Route {
+  provider: ProviderName;
+  model: string;
+}
+
 // kind -> { provider, model } — the routing table. Swap models without
 // touching the skill or the routes.
-const MODEL_BY_KIND = {
+const MODEL_BY_KIND: Record<DesignKind, Route> = {
   'model-shot': { provider: 'gemini', model: 'gemini-2.5-flash-image' },
   flyer: { provider: 'openrouter', model: 'openai/gpt-image-1' },
   slide: { provider: 'openrouter', model: 'openai/gpt-image-1' },
   social: { provider: 'gemini', model: 'gemini-2.5-flash-image' }
 };
 
-const DEFAULT_ROUTE = { provider: 'gemini', model: 'gemini-2.5-flash-image' };
+const DEFAULT_ROUTE: Route = { provider: 'gemini', model: 'gemini-2.5-flash-image' };
 
 // Each provider's own default model — used when falling back to a provider
 // that isn't the routed one (never send provider A a provider B model name).
-const PROVIDER_DEFAULT_MODEL = {
+const PROVIDER_DEFAULT_MODEL: Record<ProviderName, string> = {
   gemini: 'gemini-2.5-flash-image',
   openrouter: 'openai/gpt-image-1'
 };
 
+/** Build an Error that carries a machine-readable code (what the skill branches on). */
+function genError(message: string, code: ErrorCode): ImageGenError {
+  const err = new Error(message) as ImageGenError;
+  err.code = code;
+  return err;
+}
+
 /** Mock mode: forced, or no provider key at all. */
-export function isMockMode() {
+export function isMockMode(): boolean {
   if (process.env.MAE_MOCK === '1') return true;
   return !process.env.GEMINI_API_KEY && !process.env.OPENROUTER_API_KEY;
 }
 
 /** Which providers are actually configured (have a key). */
-function configuredProviders() {
+function configuredProviders(): Record<ProviderName, boolean> {
   return {
     gemini: Boolean(process.env.GEMINI_API_KEY),
     openrouter: Boolean(process.env.OPENROUTER_API_KEY)
   };
+}
+
+export interface PromptInput {
+  kind: DesignKind;
+  brief: string;
+  garment?: string | null;
 }
 
 /**
@@ -64,22 +86,24 @@ function configuredProviders() {
  * Kept here so the exact prompt sent to the model is recorded on the design —
  * auditable, and tweakable without re-publishing the skill.
  */
-export function buildPrompt({ kind, brief, garment }) {
-  const style = {
-    'model-shot':
-      'Photorealistic fashion editorial photo of a young girl model wearing the garment described, ' +
-      'studio lighting, plain neutral background, full outfit visible, e-commerce catalogue style. ' +
-      'Illustrative AI-generated image — not a real child.',
-    flyer:
-      'Clean modern social-media sale flyer for a childrenswear brand, bold headline text from the brief, ' +
-      'soft pastel palette, dress illustrations, plenty of white space, no watermark.',
-    slide:
-      'Minimal presentation slide background for a childrenswear business deck, one clear visual theme, ' +
-      'space for a title and three bullet points, brand-neutral.',
-    social:
-      'Instagram-style product post image for a girls dress brand, lifestyle composition, ' +
-      'square format, cheerful pastel tones.'
-  }[kind] || 'Clean commercial image for a childrenswear brand.';
+export function buildPrompt({ kind, brief, garment }: PromptInput): string {
+  const style = (
+    {
+      'model-shot':
+        'Photorealistic fashion editorial photo of a young girl model wearing the garment described, ' +
+        'studio lighting, plain neutral background, full outfit visible, e-commerce catalogue style. ' +
+        'Illustrative AI-generated image — not a real child.',
+      flyer:
+        'Clean modern social-media sale flyer for a childrenswear brand, bold headline text from the brief, ' +
+        'soft pastel palette, dress illustrations, plenty of white space, no watermark.',
+      slide:
+        'Minimal presentation slide background for a childrenswear business deck, one clear visual theme, ' +
+        'space for a title and three bullet points, brand-neutral.',
+      social:
+        'Instagram-style product post image for a girls dress brand, lifestyle composition, ' +
+        'square format, cheerful pastel tones.'
+    } satisfies Record<DesignKind, string>
+  )[kind] || 'Clean commercial image for a childrenswear brand.';
 
   return `${style}\n\nBrief: ${brief}${garment ? `\nGarment: ${garment}` : ''}`;
 }
@@ -90,7 +114,7 @@ export function buildPrompt({ kind, brief, garment }) {
  * Tries the routed provider first, then falls back to any other configured
  * provider, then throws NO_IMAGE_PROVIDER if none worked.
  */
-export async function generateImage({ kind, brief, garment }) {
+export async function generateImage({ kind, brief, garment }: PromptInput): Promise<GeneratedImage> {
   const prompt = buildPrompt({ kind, brief, garment });
 
   // 1. Mock tier — free, deterministic, used by tests.
@@ -109,52 +133,67 @@ export async function generateImage({ kind, brief, garment }) {
   const providers = configuredProviders();
 
   // 2. Build the attempt list: routed provider first, then the others.
-  const attempts = [];
+  const attempts: { provider: ProviderName; model: string }[] = [];
   if (providers[route.provider]) {
     attempts.push({ provider: route.provider, model: route.model });
   }
-  for (const name of ['gemini', 'openrouter']) {
+  for (const name of ['gemini', 'openrouter'] as const) {
     if (name !== route.provider && providers[name]) {
       attempts.push({ provider: name, model: PROVIDER_DEFAULT_MODEL[name] });
     }
   }
 
   if (attempts.length === 0) {
-    const err = new Error(
-      'No image provider configured — set GEMINI_API_KEY or OPENROUTER_API_KEY, or MAE_MOCK=1 for mock mode'
+    throw genError(
+      'No image provider configured — set GEMINI_API_KEY or OPENROUTER_API_KEY, or MAE_MOCK=1 for mock mode',
+      'NO_IMAGE_PROVIDER'
     );
-    err.code = 'NO_IMAGE_PROVIDER';
-    throw err;
   }
 
-  let lastErr = null;
+  let lastErr: unknown = null;
   for (const attempt of attempts) {
     try {
       const result =
         attempt.provider === 'gemini'
           ? await callGemini(attempt.model, prompt)
           : await callOpenRouter(attempt.model, prompt);
-      return { prompt, provider: attempt.provider, model: attempt.model, ...result };
+      return { prompt, provider: attempt.provider, model: attempt.model, mock: false, ...result };
     } catch (err) {
       lastErr = err; // try the next provider
     }
   }
 
   // All configured providers failed — surface the last real error.
-  throw lastErr || Object.assign(new Error('All image providers failed'), { code: 'IMAGE_API_UNAVAILABLE' });
+  throw lastErr || genError('All image providers failed', 'IMAGE_API_UNAVAILABLE');
 }
 
 // --- providers ---------------------------------------------------------------
 
-async function callGemini(model, prompt) {
+/** Shape of a fetch failure's cause (undici wraps the real error). */
+interface FetchCause {
+  code?: string;
+  message?: string;
+}
+
+function unreachable(provider: string, networkErr: unknown): ImageGenError {
+  const e = networkErr as { message?: string; cause?: FetchCause };
+  const cause = e.cause?.code || e.cause?.message || '';
+  return genError(
+    `${provider} unreachable: ${e.message || 'fetch failed'}${cause ? ` (${cause})` : ''}`,
+    'IMAGE_API_UNAVAILABLE'
+  );
+}
+
+async function callGemini(
+  model: string,
+  prompt: string
+): Promise<{ imageBase64: string; mimeType: string }> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) {
-    const err = new Error('GEMINI_API_KEY not set');
-    err.code = 'GEMINI_NOT_CONFIGURED';
-    throw err;
+    throw genError('GEMINI_API_KEY not set', 'GEMINI_NOT_CONFIGURED');
   }
 
-  let response;
+  let response: Response;
   try {
     response = await fetch(`${GEMINI_BASE}/v1beta/models/${model}:generateContent`, {
       method: 'POST',
@@ -162,26 +201,25 @@ async function callGemini(model, prompt) {
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
     });
   } catch (networkErr) {
-    const cause = networkErr.cause?.code || networkErr.cause?.message || '';
-    const err = new Error(`Gemini unreachable: ${networkErr.message}${cause ? ` (${cause})` : ''}`);
-    err.code = 'IMAGE_API_UNAVAILABLE';
-    throw err;
+    throw unreachable('Gemini', networkErr);
   }
 
-  const json = await response.json().catch(() => null);
+  const json: any = await response.json().catch(() => null);
   if (!response.ok || !json) {
-    const err = new Error(json?.error?.message || `Gemini returned HTTP ${response.status}`);
-    err.code = 'IMAGE_API_UNAVAILABLE';
-    throw err;
+    throw genError(
+      json?.error?.message || `Gemini returned HTTP ${response.status}`,
+      'IMAGE_API_UNAVAILABLE'
+    );
   }
 
   const parts = json?.candidates?.[0]?.content?.parts || [];
-  const imagePart = parts.find((p) => p.inlineData?.data);
+  const imagePart = parts.find((p: { inlineData?: { data?: string } }) => p.inlineData?.data);
   if (!imagePart) {
-    const text = parts.map((p) => p.text).filter(Boolean).join(' ');
-    const err = new Error(text || 'Gemini returned no image for this prompt');
-    err.code = 'IMAGE_API_UNAVAILABLE';
-    throw err;
+    const text = parts
+      .map((p: { text?: string }) => p.text)
+      .filter(Boolean)
+      .join(' ');
+    throw genError(text || 'Gemini returned no image for this prompt', 'IMAGE_API_UNAVAILABLE');
   }
 
   return {
@@ -190,15 +228,16 @@ async function callGemini(model, prompt) {
   };
 }
 
-async function callOpenRouter(model, prompt) {
+async function callOpenRouter(
+  model: string,
+  prompt: string
+): Promise<{ imageBase64: string; mimeType: string }> {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) {
-    const err = new Error('OPENROUTER_API_KEY not set');
-    err.code = 'IMAGE_API_UNAVAILABLE';
-    throw err;
+    throw genError('OPENROUTER_API_KEY not set', 'IMAGE_API_UNAVAILABLE');
   }
 
-  let response;
+  let response: Response;
   try {
     response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
       method: 'POST',
@@ -211,40 +250,39 @@ async function callOpenRouter(model, prompt) {
       })
     });
   } catch (networkErr) {
-    const cause = networkErr.cause?.code || networkErr.cause?.message || '';
-    const err = new Error(`OpenRouter unreachable: ${networkErr.message}${cause ? ` (${cause})` : ''}`);
-    err.code = 'IMAGE_API_UNAVAILABLE';
-    throw err;
+    throw unreachable('OpenRouter', networkErr);
   }
 
-  const json = await response.json().catch(() => null);
+  const json: any = await response.json().catch(() => null);
   if (!response.ok || !json) {
-    const err = new Error(json?.error?.message || `OpenRouter returned HTTP ${response.status}`);
-    err.code = 'IMAGE_API_UNAVAILABLE';
-    throw err;
+    throw genError(
+      json?.error?.message || `OpenRouter returned HTTP ${response.status}`,
+      'IMAGE_API_UNAVAILABLE'
+    );
   }
 
   // Image models return content as an array of parts, one with image_url.
   const content = json?.choices?.[0]?.message?.content;
   const parts = Array.isArray(content) ? content : [];
-  const imagePart = parts.find((p) => p.image_url?.url);
+  const imagePart = parts.find((p: { image_url?: { url?: string } }) => p.image_url?.url);
   if (!imagePart) {
     const text = typeof content === 'string' ? content : JSON.stringify(content);
-    const err = new Error(text || 'OpenRouter returned no image for this prompt');
-    err.code = 'IMAGE_API_UNAVAILABLE';
-    throw err;
+    throw genError(text || 'OpenRouter returned no image for this prompt', 'IMAGE_API_UNAVAILABLE');
   }
 
   const url = imagePart.image_url.url; // data URL or https URL
   if (url.startsWith('data:')) {
-    const [header, base64] = url.split(',');
+    const [header = '', base64 = ''] = url.split(',');
     const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
     return { imageBase64: base64, mimeType };
   }
   // Remote URL — fetch the bytes so the caller stores the file locally.
   const imgRes = await fetch(url);
   const buf = Buffer.from(await imgRes.arrayBuffer());
-  return { imageBase64: buf.toString('base64'), mimeType: imgRes.headers.get('content-type') || 'image/png' };
+  return {
+    imageBase64: buf.toString('base64'),
+    mimeType: imgRes.headers.get('content-type') || 'image/png'
+  };
 }
 
 // --- mock image -------------------------------------------------------------
@@ -253,7 +291,7 @@ async function callOpenRouter(model, prompt) {
  * A real (tiny) PNG so the mock path exercises the exact same
  * save-file -> serve-image code as the real path. No dependencies.
  */
-function mockPngBase64() {
+function mockPngBase64(): string {
   const RED_1PX =
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
   void randomUUID;

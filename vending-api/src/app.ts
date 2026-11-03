@@ -16,41 +16,56 @@
  * Mae's flow:  generate -> pending -> human approves/rejects -> human posts.
  */
 import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadDb, saveDb, resetDb } from './store.js';
 import { generateImage, isMockMode } from './imagegen.js';
+import type {
+  AirtimePurchase,
+  Db,
+  Design,
+  ElectricityPurchase,
+  ErrorCode,
+  ErrorEnvelope,
+  FundingSource,
+  ImageGenError
+} from './types.js';
 
 const API_KEY = process.env.VENDING_API_KEY || 'test_vending_key';
 
 // --- small helpers ---------------------------------------------------------
 
-const envelope = (status, message, data = {}) => ({ status, message, data });
+function envelope<T extends object>(status: boolean, message: string, data?: T) {
+  return { status, message, data: (data ?? {}) as T };
+}
 
-const errorEnvelope = (httpStatus, code, message) => ({
-  status: false,
-  message,
-  data: { error: { code, status: httpStatus } }
-});
+function errorEnvelope(httpStatus: number, code: ErrorCode, message: string): ErrorEnvelope {
+  return {
+    status: false,
+    message,
+    data: { error: { code, status: httpStatus } }
+  };
+}
 
 /** Positive integer amount in kobo, or null if invalid. */
-function parseAmount(value) {
+function parseAmount(value: unknown): number | null {
   if (typeof value === 'string' && /^\d+$/.test(value)) value = Number(value);
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return null;
   return value;
 }
 
-const naira = (kobo) => `NGN ${(kobo / 100).toFixed(2)}`;
-const newReference = () => `blsm_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+const naira = (kobo: number): string => `NGN ${(kobo / 100).toFixed(2)}`;
+const newReference = (): string => `blsm_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
 // Where Mae's generated images live (served unauthenticated at /images/:file).
 const IMAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'images');
-const DESIGN_KINDS = ['model-shot', 'flyer', 'slide', 'social'];
+const DESIGN_KINDS = ['model-shot', 'flyer', 'slide', 'social'] as const;
 // Cost cap: refuse to burn through credits in one session (override: MAE_MAX_GENERATIONS).
 // Read at request time so tests (and ops) can change it without a restart.
-function maxGenerations() {
+function maxGenerations(): number {
   return Number(process.env.MAE_MAX_GENERATIONS) || 10;
 }
 
@@ -65,7 +80,7 @@ app.get('/health', (_req, res) => {
 });
 
 // Bearer auth for everything below (Chord/Paystack pattern).
-app.use('/v1', (req, res, next) => {
+app.use('/v1', (req: Request, res: Response, next: NextFunction) => {
   const auth = req.headers.authorization || '';
   if (auth !== `Bearer ${API_KEY}`) {
     return res
@@ -87,12 +102,18 @@ app.get('/v1/wallet', (req, res) => {
 // can never be counted twice:
 //   a) bank transfer (PUSH, the path that works today) -> owner sends to the
 //      biller account, we record detection via /v1/wallet/incoming
-//   b) Paystack pull (BLOCKED on our starter account) -> src/paystack.js
+//   b) Paystack pull (BLOCKED on our starter account) -> src/paystack.ts
 //      would move money, we'd record it via /v1/wallet/paystack-funded.
 //      Kept as the go-live upgrade path; see the transfer_unavailable note
-//      in src/paystack.js and field-notes.md.
+//      in src/paystack.ts and field-notes.md.
 
-function fundWallet(db, res, amount, source, reference) {
+function fundWallet(
+  db: Db,
+  res: Response,
+  amount: number | null,
+  source: FundingSource,
+  reference?: string
+): Response | void {
   if (amount === null) {
     return res
       .status(422)
@@ -113,7 +134,7 @@ function fundWallet(db, res, amount, source, reference) {
   const credit = {
     id: `cr_${randomUUID().slice(0, 8)}`,
     amount,
-    currency: 'NGN',
+    currency: 'NGN' as const,
     source, // 'bank_transfer' | 'paystack'
     reference,
     balance_after: db.wallet.balance,
@@ -197,7 +218,11 @@ app.post('/v1/validate/phone', (req, res) => {
 // --- purchases -------------------------------------------------------------
 
 /** If this Idempotency-Key was used before, return the original result (no new buy). */
-function replayIfDuplicate(db, res, idempotencyKey) {
+function replayIfDuplicate(
+  db: Db,
+  res: Response,
+  idempotencyKey: string | undefined
+): boolean {
   if (!idempotencyKey || !db.idempotency[idempotencyKey]) return false;
   const original = db.purchases.find((p) => p.id === db.idempotency[idempotencyKey]);
   res.json(
@@ -206,7 +231,7 @@ function replayIfDuplicate(db, res, idempotencyKey) {
   return true;
 }
 
-function walletTooSmall(res, db, amount) {
+function walletTooSmall(res: Response, db: Db, amount: number): boolean {
   if (db.wallet.balance >= amount) return false;
   res
     .status(402)
@@ -224,7 +249,7 @@ app.post('/v1/purchases/electricity', (req, res) => {
   const db = loadDb();
   const { meter_number, disco, type } = req.body || {};
   const amount = parseAmount(req.body?.amount);
-  const idempotencyKey = req.headers['idempotency-key'];
+  const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
 
   if (!meter_number || !disco || amount === null) {
     return res
@@ -255,7 +280,7 @@ app.post('/v1/purchases/electricity', (req, res) => {
   if (walletTooSmall(res, db, amount)) return;
 
   db.wallet.balance -= amount;
-  const purchase = {
+  const purchase: ElectricityPurchase = {
     id: `pur_${randomUUID().slice(0, 8)}`,
     kind: 'electricity',
     status: 'success',
@@ -282,7 +307,7 @@ app.post('/v1/purchases/airtime', (req, res) => {
   const db = loadDb();
   const { phone_number, network } = req.body || {};
   const amount = parseAmount(req.body?.amount);
-  const idempotencyKey = req.headers['idempotency-key'];
+  const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
 
   if (!phone_number || amount === null) {
     return res
@@ -309,14 +334,16 @@ app.post('/v1/purchases/airtime', (req, res) => {
   if (walletTooSmall(res, db, amount)) return;
 
   db.wallet.balance -= amount;
-  const purchase = {
+  const purchase: AirtimePurchase = {
     id: `pur_${randomUUID().slice(0, 8)}`,
     kind: 'airtime',
     status: 'success',
     amount,
     currency: 'NGN',
     phone_number: entry.phone_number,
-    network: entry.network,
+    // Valid seeded lines always carry a network; the cast keeps the response
+    // shape identical to the JS version.
+    network: entry.network as string,
     reference: newReference(),
     wallet_balance_after: db.wallet.balance,
     created_at: new Date().toISOString()
@@ -407,7 +434,7 @@ app.post('/v1/designs/generate', async (req, res) => {
     mkdirSync(IMAGES_DIR, { recursive: true });
     writeFileSync(join(IMAGES_DIR, filename), Buffer.from(result.imageBase64, 'base64'));
 
-    const design = {
+    const design: Design = {
       id,
       kind,
       brief: brief.trim(),
@@ -428,17 +455,18 @@ app.post('/v1/designs/generate', async (req, res) => {
 
     res.status(201).json(envelope(true, 'Design created — queued for approval', { ...design }));
   } catch (err) {
-    const code = err.code || 'IMAGE_API_UNAVAILABLE';
+    const e = err as Partial<ImageGenError>;
+    const code: ErrorCode = e.code || 'IMAGE_API_UNAVAILABLE';
     const status = code === 'GENERATION_LIMIT' ? 429 : 503;
-    res.status(status).json(errorEnvelope(status, code, err.message));
+    res.status(status).json(errorEnvelope(status, code, e.message || 'Image generation failed'));
   }
 });
 
 // The approval queue — filter with ?status=pending
 app.get('/v1/designs', (req, res) => {
   const db = loadDb();
-  const { status } = req.query;
-  const designs = status ? db.designs.filter((d) => d.status === status) : db.designs;
+  const status = req.query.status;
+  const designs = status ? db.designs.filter((d) => d.status === String(status)) : db.designs;
   res.json(envelope(true, 'Designs retrieved', { designs }));
 });
 
@@ -498,7 +526,7 @@ app.use((req, res) => {
 });
 
 // Malformed JSON body -> standard envelope, not an HTML stack trace.
-app.use((err, _req, res, _next) => {
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   if (err.type === 'entity.parse.failed') {
     return res
       .status(400)

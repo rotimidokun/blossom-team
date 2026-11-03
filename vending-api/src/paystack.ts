@@ -26,18 +26,43 @@
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
 
-function secretKey() {
+/** Paystack's envelope: { status, message, data } — same shape we use. */
+interface PaystackEnvelope {
+  status: boolean;
+  message?: string;
+  data?: unknown;
+}
+
+/** Error thrown by this client — carries a machine-readable code. */
+export interface PaystackError extends Error {
+  code: string;
+  details?: unknown;
+}
+
+function fail(message: string, code: string, details?: unknown): PaystackError {
+  const err = new Error(message) as PaystackError;
+  err.code = code;
+  if (details !== undefined) err.details = details;
+  return err;
+}
+
+function secretKey(): string {
   return process.env.PAYSTACK_SECRET_KEY || '';
 }
 
-async function paystackCall(method, path, body) {
+// Paystack's `data` payload varies per endpoint (balance vs transfer), so the
+// shared caller returns it untyped and each export shapes its own response.
+async function paystackCall(
+  method: 'GET' | 'POST',
+  path: string,
+  body?: Record<string, unknown>
+): Promise<any> {
   const key = secretKey();
   if (!key) {
-    const err = new Error(
-      'PAYSTACK_SECRET_KEY not set — add your sk_test_... key to the environment'
+    throw fail(
+      'PAYSTACK_SECRET_KEY not set — add your sk_test_... key to the environment',
+      'PAYSTACK_NOT_CONFIGURED'
     );
-    err.code = 'PAYSTACK_NOT_CONFIGURED';
-    throw err;
   }
 
   const response = await fetch(`${PAYSTACK_BASE}${path}`, {
@@ -49,19 +74,15 @@ async function paystackCall(method, path, body) {
     body: body ? JSON.stringify(body) : undefined
   });
 
-  const json = await response.json();
-  // Paystack's envelope: { status, message, data } — same shape we use.
+  const json = (await response.json()) as PaystackEnvelope;
   if (!json.status) {
-    const err = new Error(json.message || 'Paystack request failed');
-    err.code = 'PAYSTACK_ERROR';
-    err.details = json;
-    throw err;
+    throw fail(json.message || 'Paystack request failed', 'PAYSTACK_ERROR', json);
   }
   return json.data;
 }
 
 /** GET /balance — available balance per currency (kobo for NGN). */
-export async function checkBalance() {
+export async function checkBalance(): Promise<{ balance: number; currency: string }> {
   const data = await paystackCall('GET', '/balance');
   // Response: { balance, currency, ... } possibly wrapped in an array
   const entry = Array.isArray(data) ? data[0] : data;
@@ -71,19 +92,35 @@ export async function checkBalance() {
   };
 }
 
+export interface TransferArgs {
+  amountKobo: number;
+  reference: string;
+  reason?: string;
+}
+
+export interface TransferResult {
+  transfer_code: string;
+  reference: string;
+  status: string; // 'pending' | 'success' | 'processing'
+  amount: number;
+}
+
 /**
  * POST /transfer — move money from the Paystack balance to the biller.
  * Returns { reference, status, amount } so the caller can record it
  * against the vending wallet (POST /v1/wallet/paystack-funded).
  */
-export async function transfer({ amountKobo, reference, reason }) {
+export async function transfer({
+  amountKobo,
+  reference,
+  reason
+}: TransferArgs): Promise<TransferResult> {
   const recipient = process.env.PAYSTACK_RECIPIENT;
   if (!recipient) {
-    const err = new Error(
-      'PAYSTACK_RECIPIENT not set — create a transfer recipient once (POST /transferrecipient) and put its code here'
+    throw fail(
+      'PAYSTACK_RECIPIENT not set — create a transfer recipient once (POST /transferrecipient) and put its code here',
+      'PAYSTACK_NOT_CONFIGURED'
     );
-    err.code = 'PAYSTACK_NOT_CONFIGURED';
-    throw err;
   }
 
   const data = await paystackCall('POST', '/transfer', {
