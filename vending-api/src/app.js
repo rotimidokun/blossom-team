@@ -1,6 +1,10 @@
 /**
  * Blossom by TC — mock vending API (Express).
  *
+ * One server, two teammates' tools:
+ *   Kemi — wallet, validation, purchases (utility bills)
+ *   Mae  — designs: generate -> approval queue -> approve/reject
+ *
  * Conventions, deliberately mirroring the APIs we studied:
  *  - Response envelope { status, message, data }  (Paystack-style)
  *  - Bearer auth on every /v1 route                (Chord + Paystack style)
@@ -8,11 +12,16 @@
  *  - Idempotency-Key header on purchases           (safe retries, no double-buy)
  *  - Machine-readable error codes                  (what the skill branches on)
  *
- * Flow the skill enforces: validate -> show owner -> confirm -> purchase.
+ * Kemi's flow: validate -> show owner -> confirm -> purchase.
+ * Mae's flow:  generate -> pending -> human approves/rejects -> human posts.
  */
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadDb, saveDb, resetDb } from './store.js';
+import { generateImage, isMockMode } from './imagegen.js';
 
 const API_KEY = process.env.VENDING_API_KEY || 'test_vending_key';
 
@@ -35,6 +44,15 @@ function parseAmount(value) {
 
 const naira = (kobo) => `NGN ${(kobo / 100).toFixed(2)}`;
 const newReference = () => `blsm_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+
+// Where Mae's generated images live (served unauthenticated at /images/:file).
+const IMAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'images');
+const DESIGN_KINDS = ['model-shot', 'flyer', 'slide', 'social'];
+// Cost cap: refuse to burn through credits in one session (override: MAE_MAX_GENERATIONS).
+// Read at request time so tests (and ops) can change it without a restart.
+function maxGenerations() {
+  return Number(process.env.MAE_MAX_GENERATIONS) || 10;
+}
 
 // --- app -------------------------------------------------------------------
 
@@ -334,6 +352,141 @@ app.post('/v1/reset', (req, res) => {
   }
   resetDb();
   res.json(envelope(true, 'Database reset to seed state'));
+});
+
+// --- designs (Mae's approval queue) ----------------------------------------
+// Mae creates -> status pending -> owner approves/rejects -> owner posts.
+// The agent NEVER publishes; the queue is the real action the tool takes.
+
+/** Serve a generated image by filename (no auth — it's a shareable link). */
+app.get('/images/:file', (req, res) => {
+  const file = req.params.file.replace(/[^a-zA-Z0-9._-]/g, ''); // no path traversal
+  const path = join(IMAGES_DIR, file);
+  if (!existsSync(path)) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Image not found'));
+  }
+  res.sendFile(path);
+});
+
+// Generate an image -> save file -> queue as pending.
+app.post('/v1/designs/generate', async (req, res) => {
+  const db = loadDb();
+  const { kind, brief, garment } = req.body || {};
+
+  if (!kind || !DESIGN_KINDS.includes(kind)) {
+    return res
+      .status(422)
+      .json(
+        errorEnvelope(422, 'VALIDATION_FAILED', `kind must be one of: ${DESIGN_KINDS.join(', ')}`)
+      );
+  }
+  if (!brief || typeof brief !== 'string' || !brief.trim()) {
+    return res
+      .status(422)
+      .json(errorEnvelope(422, 'VALIDATION_FAILED', 'brief is required — describe the visual'));
+  }
+  const cap = maxGenerations();
+  if (db.generation_count >= cap) {
+    return res
+      .status(429)
+      .json(
+        errorEnvelope(
+          429,
+          'GENERATION_LIMIT',
+          `Generation cap reached (${cap} this session) — reset or raise MAE_MAX_GENERATIONS`
+        )
+      );
+  }
+
+  try {
+    const result = await generateImage({ kind, brief: brief.trim(), garment });
+
+    const id = `des_${randomUUID().slice(0, 8)}`;
+    const ext = result.mimeType === 'image/jpeg' ? 'jpg' : 'png';
+    const filename = `${id}.${ext}`;
+    mkdirSync(IMAGES_DIR, { recursive: true });
+    writeFileSync(join(IMAGES_DIR, filename), Buffer.from(result.imageBase64, 'base64'));
+
+    const design = {
+      id,
+      kind,
+      brief: brief.trim(),
+      garment: garment || null,
+      prompt_used: result.prompt,
+      provider: result.provider,
+      model: result.model,
+      mock: result.mock,
+      image_file: filename,
+      image_url: `/images/${filename}`,
+      status: 'pending',
+      rejection_reason: null,
+      created_at: new Date().toISOString()
+    };
+    db.designs.push(design);
+    db.generation_count += 1;
+    saveDb(db);
+
+    res.status(201).json(envelope(true, 'Design created — queued for approval', { ...design }));
+  } catch (err) {
+    const code = err.code || 'IMAGE_API_UNAVAILABLE';
+    const status = code === 'GENERATION_LIMIT' ? 429 : 503;
+    res.status(status).json(errorEnvelope(status, code, err.message));
+  }
+});
+
+// The approval queue — filter with ?status=pending
+app.get('/v1/designs', (req, res) => {
+  const db = loadDb();
+  const { status } = req.query;
+  const designs = status ? db.designs.filter((d) => d.status === status) : db.designs;
+  res.json(envelope(true, 'Designs retrieved', { designs }));
+});
+
+app.get('/v1/designs/:id', (req, res) => {
+  const db = loadDb();
+  const design = db.designs.find((d) => d.id === req.params.id);
+  if (!design) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Design not found'));
+  }
+  res.json(envelope(true, 'Design retrieved', { ...design }));
+});
+
+// Human flips pending -> approved (then posts manually).
+app.post('/v1/designs/:id/approve', (req, res) => {
+  const db = loadDb();
+  const design = db.designs.find((d) => d.id === req.params.id);
+  if (!design) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Design not found'));
+  }
+  if (design.status !== 'pending') {
+    return res
+      .status(409)
+      .json(errorEnvelope(409, 'INVALID_STATE', `Design is already ${design.status}`));
+  }
+  design.status = 'approved';
+  design.approved_at = new Date().toISOString();
+  saveDb(db);
+  res.json(envelope(true, 'Design approved — ready to post', { ...design }));
+});
+
+// Human flips pending -> rejected, with a reason Mae can act on.
+app.post('/v1/designs/:id/reject', (req, res) => {
+  const db = loadDb();
+  const design = db.designs.find((d) => d.id === req.params.id);
+  if (!design) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Design not found'));
+  }
+  if (design.status !== 'pending') {
+    return res
+      .status(409)
+      .json(errorEnvelope(409, 'INVALID_STATE', `Design is already ${design.status}`));
+  }
+  const { reason } = req.body || {};
+  design.status = 'rejected';
+  design.rejection_reason = reason || null;
+  design.rejected_at = new Date().toISOString();
+  saveDb(db);
+  res.json(envelope(true, 'Design rejected', { ...design }));
 });
 
 // --- unknown routes --------------------------------------------------------

@@ -8,6 +8,10 @@ import { join } from 'node:path';
 process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'vending-')), 'db.json');
 process.env.VENDING_API_KEY = 'test_vending_key';
 delete process.env.NODE_ENV;
+// Force mock image mode — tests never call a real image provider, never cost money.
+process.env.MAE_MOCK = '1';
+delete process.env.GEMINI_API_KEY;
+delete process.env.OPENROUTER_API_KEY;
 
 const { startServer } = await import('../src/server.js');
 
@@ -235,4 +239,107 @@ test('unknown route is 404 with envelope', async () => {
   assert.equal(http, 404);
   assert.equal(json.status, false);
   assert.equal(json.data.error.code, 'NOT_FOUND');
+});
+
+// --- designs (Mae's approval queue, mock image mode) ------------------------
+
+test('generate a design -> 201, status pending, image_url present', async () => {
+  const { http, json } = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'flyer', brief: 'June sale - 20% off all dresses' }
+  });
+  assert.equal(http, 201);
+  assert.equal(json.data.status, 'pending');
+  assert.equal(json.data.kind, 'flyer');
+  assert.equal(json.data.provider, 'mock');
+  assert.match(json.data.image_url, /^\/images\/des_[a-f0-9]+\.png$/);
+  assert.ok(json.data.prompt_used.includes('June sale'));
+});
+
+test('generated image is served at /images (no auth)', async () => {
+  const created = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'social', brief: 'New arrivals post' }
+  });
+  const res = await fetch(base + created.json.data.image_url);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /image/);
+});
+
+test('generate without brief is 422 VALIDATION_FAILED', async () => {
+  const { http, json } = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'flyer' }
+  });
+  assert.equal(http, 422);
+  assert.equal(json.data.error.code, 'VALIDATION_FAILED');
+});
+
+test('generate with unknown kind is 422', async () => {
+  const { http, json } = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'meme', brief: 'anything' }
+  });
+  assert.equal(http, 422);
+  assert.equal(json.data.error.code, 'VALIDATION_FAILED');
+});
+
+test('approval queue filters by status=pending', async () => {
+  const created = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'slide', brief: 'Q3 deck cover' }
+  });
+  const queue = await call('GET', '/v1/designs?status=pending');
+  assert.equal(queue.http, 200);
+  const ids = queue.json.data.designs.map((d) => d.id);
+  assert.ok(ids.includes(created.json.data.id));
+  assert.ok(queue.json.data.designs.every((d) => d.status === 'pending'));
+});
+
+test('approve flips pending -> approved; approving twice is 409 INVALID_STATE', async () => {
+  const created = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'flyer', brief: 'Easter special' }
+  });
+  const id = created.json.data.id;
+
+  const first = await call('POST', `/v1/designs/${id}/approve`);
+  assert.equal(first.http, 200);
+  assert.equal(first.json.data.status, 'approved');
+
+  const second = await call('POST', `/v1/designs/${id}/approve`);
+  assert.equal(second.http, 409);
+  assert.equal(second.json.data.error.code, 'INVALID_STATE');
+});
+
+test('reject records a reason; rejected design leaves the pending queue', async () => {
+  const created = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'model-shot', brief: 'Yellow dress on model' }
+  });
+  const id = created.json.data.id;
+
+  const rejected = await call('POST', `/v1/designs/${id}/reject`, {
+    body: { reason: 'Colors off-brand' }
+  });
+  assert.equal(rejected.http, 200);
+  assert.equal(rejected.json.data.status, 'rejected');
+  assert.equal(rejected.json.data.rejection_reason, 'Colors off-brand');
+
+  const queue = await call('GET', '/v1/designs?status=pending');
+  assert.ok(!queue.json.data.designs.some((d) => d.id === id));
+});
+
+test('unknown design id is 404 NOT_FOUND', async () => {
+  const { http, json } = await call('GET', '/v1/designs/des_nope');
+  assert.equal(http, 404);
+  assert.equal(json.data.error.code, 'NOT_FOUND');
+});
+
+test('generation cap returns 429 GENERATION_LIMIT', async () => {
+  // Set the cap to the count already generated, then try one more.
+  const before = (await call('GET', '/v1/designs')).json.data.designs.length;
+  process.env.MAE_MAX_GENERATIONS = String(before);
+  try {
+    const { http, json } = await call('POST', '/v1/designs/generate', {
+      body: { kind: 'flyer', brief: 'one too many' }
+    });
+    assert.equal(http, 429);
+    assert.equal(json.data.error.code, 'GENERATION_LIMIT');
+  } finally {
+    delete process.env.MAE_MAX_GENERATIONS;
+  }
 });
