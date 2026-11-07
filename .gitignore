@@ -14,3 +14,6 @@ vending-api/.env
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Local tunnel binary (downloaded, not source)
+vending-api/bin/

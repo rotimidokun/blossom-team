@@ -51,10 +51,10 @@ This gives you the `RC_...` code the pull path needs:
 curl https://api.paystack.co/transferrecipient -X POST \
   -H "Authorization: Bearer sk_test_YOUR_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"type":"nuban","name":"Blossom Vending Test","bank_code":"232","account_number":"1234567890","currency":"NGN"}'
+  -d '{"type":"nuban","name":"Blossom Vending Test","bank_code":"057","account_number":"0000000000","currency":"NGN"}'
 ```
 
-- `bank_code` `232` = Sterling Bank (matches our made-up account). Any test bank works.
+- `bank_code` `057` = Zenith Bank — the pair above is Paystack's documented test account (Payments → Test Payments → Bank accounts), and it matches our wallet's biller account so push-path and pull-path tell the same story.
 - Copy `data.recipient_code` (`RC_...`) into `PAYSTACK_RECIPIENT` in `.env`.
 
 ---
@@ -71,7 +71,7 @@ curl http://localhost:3000/v1/wallet/incoming -X POST \
 ```
 
 - `amount` is in **kobo** — `5000000` = ₦50,000.
-- The owner "sends" to the biller account (`1234567890`, Sterling Bank test); we record the
+- The owner "sends" to the biller account (`0000000000`, Zenith Bank test); we record the
   reference so the same money can never be counted twice.
 
 **4b. Confirm:**
@@ -85,11 +85,12 @@ Expected: `"balance": 5000000` (₦50,000).
 > **Try the duplicate:** run step 4 again with the same reference → `409 IDEMPOTENT_REPLAY`.
 > The same money can never be counted twice.
 
-> **Why not the Paystack pull path?** `POST /transfer` is blocked on our test account —
-> `transfer_unavailable`: *"You cannot initiate third party payouts as a starter business."*
-> Paystack requires a verified (Registered) business for payouts, including in test mode.
-> The pull path (`src/paystack.ts` + `/v1/wallet/paystack-funded`) stays in the codebase as
-> the go-live upgrade. See `field-notes.md` for the full note.
+> **Why not the Paystack pull path?** It's now *permitted* (the Registered Business
+> re-onboarding on 2026-11-05 lifted the old starter-account block) but the test
+> balance is ₦0, so `POST /transfer` returns `insufficient_balance`. The push path
+> above is what the demo uses; the pull path (`src/paystack.ts` +
+> `/v1/wallet/paystack-funded`) activates as soon as the test balance is funded.
+> See `field-notes.md` for the full note.
 
 ---
 

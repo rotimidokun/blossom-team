@@ -30,8 +30,9 @@ No environment setup needed — defaults are dev-safe:
 | `NODE_ENV` | — | `production` disables `POST /v1/reset` |
 | `PAYSTACK_SECRET_KEY` | — | Optional `sk_test_...` — enables the real Paystack pull top-up |
 | `PAYSTACK_RECIPIENT` | — | Optional `RC_...` transfer-recipient code for the pull top-up |
-| `GEMINI_API_KEY` | — | Optional AI Studio key — real image generation for Mae |
-| `OPENROUTER_API_KEY` | — | Optional OpenRouter key — fallback image provider |
+| `GEMINI_API_KEY` | — | Optional AI Studio key — Gemini image generation (disabled for now, prepay credits depleted) |
+| `OPENROUTER_API_KEY` | — | Optional OpenRouter key — primary image provider via the dedicated `/api/v1/images` endpoint |
+| `OPENROUTER_MODEL` | `openai/gpt-image-2.5-flare` | Override the OpenRouter image model |
 | `MAE_MOCK` | — | `1` forces mock images (free — tests set this) |
 | `MAE_MAX_GENERATIONS` | `10` | Cost cap: max images per session |
 
@@ -127,7 +128,7 @@ Studied from the real APIs before building:
 
 ## Seed data (all made up)
 
-- Wallet: **starts at NGN 0** (funding is the first act of the demo), low-balance threshold NGN 5,000, funding account `1234567890` (Sterling Bank, test)
+- Wallet: **starts at NGN 0** (funding is the first act of the demo), low-balance threshold NGN 5,000, funding account `0000000000` (Zenith Bank, test — Paystack's documented test coordinates)
 - Meters: `45123456789` (IKEDC prepaid, BLOSSOM BY TC LIMITED), `87654321098` (IKEDC postpaid), `11223344556` (EKEDC — **deliberately unavailable** for the failure demo)
 - Phones: `0803…` MTN, `0805…` GLO, `0809…` AIRTEL, `07000000000` (invalid, for the error demo)
 
@@ -171,7 +172,7 @@ flowchart LR
   W -->|purchase debits| B[Airtime / electricity token]
 ```
 
-- **Push path:** owner transfers to the biller account (`1234567890`, Sterling Bank test) → Kemi records it with a reference.
+- **Push path:** owner transfers to the biller account (`0000000000`, Zenith Bank test) → Kemi records it with a reference.
 - **Pull path:** `src/paystack.ts` calls the real Paystack test `POST /transfer` → the credit is recorded with the Paystack reference.
 - Purchases always debit the wallet, so the balance goes down after every buy — exactly like a real biller wallet.
 
