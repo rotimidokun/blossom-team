@@ -14,8 +14,11 @@ export function buildSeed(): Db {
       // insufficient-balance path without contriving it).
       balance: 0,
       low_balance_threshold: 500000, // NGN 5,000.00
-      account_number: '1234567890', // made-up biller account for bank-transfer funding
-      bank: 'Sterling Bank (test)'
+      // Paystack's own documented test account (Zenith 0000000000) — using the
+      // same test coordinates for the push-path biller and the pull-path
+      // Paystack recipient keeps the demo internally consistent for reviewers.
+      account_number: '0000000000',
+      bank: 'Zenith Bank (test)'
     },
     meters: [
       {

@@ -84,7 +84,14 @@ export type Purchase = ElectricityPurchase | AirtimePurchase;
 // --- designs (Mae's approval queue) ----------------------------------------
 
 export type DesignKind = 'model-shot' | 'flyer' | 'slide' | 'social';
-export type DesignStatus = 'pending' | 'approved' | 'rejected';
+/**
+ * Design lifecycle: `creating` (queued, image generating in the background —
+ * the POST returns in milliseconds so a slow image provider can never hold an
+ * HTTP/MCP connection open), `pending` (image ready, awaiting the owner's
+ * approval), `approved` / `rejected`, `failed` (generation error — see
+ * rejection_reason).
+ */
+export type DesignStatus = 'creating' | 'pending' | 'approved' | 'rejected' | 'failed';
 
 export interface Design {
   id: string; // des_xxxxxxxx
@@ -95,8 +102,8 @@ export interface Design {
   provider: string; // 'mock' | 'gemini' | 'openrouter'
   model: string;
   mock: boolean;
-  image_file: string; // e.g. "des_ab12cd34.png"
-  image_url: string; // e.g. "/images/des_ab12cd34.png"
+  image_file: string; // e.g. "des_ab12cd34.png" — "" while status is creating
+  image_url: string; // e.g. "/images/des_ab12cd34.png" — "" until the image is ready
   status: DesignStatus;
   rejection_reason: string | null;
   created_at: string;
@@ -147,9 +154,9 @@ export type ErrorCode =
   | 'IDEMPOTENT_REPLAY'
   | 'INVALID_STATE'
   | 'GENERATION_LIMIT'
+  | 'GENERATION_IN_PROGRESS'
   | 'IMAGE_API_UNAVAILABLE'
   | 'NO_IMAGE_PROVIDER'
-  | 'GEMINI_NOT_CONFIGURED'
   | 'INTERNAL_ERROR';
 
 // --- image generation (src/imagegen.ts) ------------------------------------

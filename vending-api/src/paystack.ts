@@ -9,13 +9,15 @@
  *   checkBalance() -> is there money in the business's Paystack account?
  *   transfer()     -> move it to the biller (funds the vending wallet)
  *
- * STATUS (2026-11-01): transfer() is BLOCKED on our test account — Paystack
- * rejects payouts from a "starter" (unverified) business with
- * `transfer_unavailable` ("You cannot initiate third party payouts as a
- * starter business"). The demo uses the push path instead
- * (POST /v1/wallet/incoming). This module stays as the documented go-live
- * upgrade: verify the business to Registered, then pull works unchanged.
- * checkBalance() still works today (read-only).
+ * STATUS (2026-11-05): the payouts gate is LIFTED. The old "starter" account
+ * rejected payouts with `transfer_unavailable`; after re-onboarding as a
+ * Registered Business (new key in .env), the same POST /transfer passes the
+ * verification gate and now fails only with `insufficient_balance` (test
+ * balance is ₦0) — i.e. the API is available, the account just needs test
+ * funds. Verified by probe: GET /balance 200, POST /transferrecipient 201
+ * (RCP_yab85z5ct7r24wg), POST /transfer -> insufficient_balance.
+ * The demo still uses the push path (POST /v1/wallet/incoming) because the
+ * test balance is empty; pull becomes the primary path once test funds exist.
  *
  * Env:
  *   PAYSTACK_SECRET_KEY  sk_test_...   (if unset, calls fail with a clear message)

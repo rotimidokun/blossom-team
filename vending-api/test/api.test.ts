@@ -254,23 +254,42 @@ test('unknown route is 404 with envelope', async () => {
 
 // --- designs (Mae's approval queue, mock image mode) ------------------------
 
-test('generate a design -> 201, status pending, image_url present', async () => {
+/**
+ * Generation is ASYNC: POST answers in milliseconds with status "creating"
+ * and the image is produced in the background (so a slow provider can never
+ * hold an HTTP/MCP connection open). Tests poll until it settles.
+ */
+async function awaitDesignReady(id: string, tries = 80): Promise<any> {
+  for (let i = 0; i < tries; i++) {
+    const { http, json } = await call('GET', `/v1/designs/${id}`);
+    if (http === 200 && json.data.status !== 'creating') return json.data;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`design ${id} never finished creating`);
+}
+
+test('generate a design -> 201 creating immediately, then pending with image_url', async () => {
   const { http, json } = await call('POST', '/v1/designs/generate', {
     body: { kind: 'flyer', brief: 'June sale - 20% off all dresses' }
   });
   assert.equal(http, 201);
-  assert.equal(json.data.status, 'pending');
+  assert.equal(json.data.status, 'creating'); // answers before the image exists
   assert.equal(json.data.kind, 'flyer');
-  assert.equal(json.data.provider, 'mock');
-  assert.match(json.data.image_url, /^\/images\/des_[a-f0-9]+\.png$/);
+  assert.equal(json.data.image_url, ''); // no link until ready
   assert.ok(json.data.prompt_used.includes('June sale'));
+
+  const ready = await awaitDesignReady(json.data.id);
+  assert.equal(ready.status, 'pending');
+  assert.equal(ready.provider, 'mock');
+  assert.match(ready.image_url, /^\/images\/des_[a-f0-9]+\.png$/);
 });
 
 test('generated image is served at /images (no auth)', async () => {
   const created = await call('POST', '/v1/designs/generate', {
     body: { kind: 'social', brief: 'New arrivals post' }
   });
-  const res = await fetch(base + created.json.data.image_url);
+  const ready = await awaitDesignReady(created.json.data.id);
+  const res = await fetch(base + ready.image_url);
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type') || '', /image/);
 });
@@ -291,10 +310,11 @@ test('generate with unknown kind is 422', async () => {
   assert.equal(json.data.error.code, 'VALIDATION_FAILED');
 });
 
-test('approval queue filters by status=pending', async () => {
+test('approval queue filters by status=pending (creating designs excluded)', async () => {
   const created = await call('POST', '/v1/designs/generate', {
     body: { kind: 'slide', brief: 'Q3 deck cover' }
   });
+  await awaitDesignReady(created.json.data.id);
   const queue = await call('GET', '/v1/designs?status=pending');
   assert.equal(queue.http, 200);
   const ids = queue.json.data.designs.map((d: any) => d.id);
@@ -307,6 +327,7 @@ test('approve flips pending -> approved; approving twice is 409 INVALID_STATE', 
     body: { kind: 'flyer', brief: 'Easter special' }
   });
   const id = created.json.data.id;
+  await awaitDesignReady(id); // approval only applies once the image exists
 
   const first = await call('POST', `/v1/designs/${id}/approve`);
   assert.equal(first.http, 200);
@@ -322,6 +343,7 @@ test('reject records a reason; rejected design leaves the pending queue', async 
     body: { kind: 'model-shot', brief: 'Yellow dress on model' }
   });
   const id = created.json.data.id;
+  await awaitDesignReady(id);
 
   const rejected = await call('POST', `/v1/designs/${id}/reject`, {
     body: { reason: 'Colors off-brand' }
@@ -340,6 +362,47 @@ test('unknown design id is 404 NOT_FOUND', async () => {
   assert.equal(json.data.error.code, 'NOT_FOUND');
 });
 
+test('PUBLIC_BASE_URL makes image_url absolute so chat links are clickable', async () => {
+  process.env.PUBLIC_BASE_URL = 'https://chat.example.test';
+  try {
+    const created = await call('POST', '/v1/designs/generate', {
+      body: { kind: 'flyer', brief: 'absolute url check flyer' }
+    });
+    const ready = await awaitDesignReady(created.json.data.id);
+    assert.match(ready.image_url, /^https:\/\/chat\.example\.test\/images\/des_/);
+
+    const one = await call('GET', `/v1/designs/${created.json.data.id}`);
+    assert.match(one.json.data.image_url, /^https:\/\//);
+
+    // without the env var, responses stay relative (the default in tests)
+    delete process.env.PUBLIC_BASE_URL;
+    const rel = await call('GET', `/v1/designs/${created.json.data.id}`);
+    assert.match(rel.json.data.image_url, /^\/images\//);
+  } finally {
+    delete process.env.PUBLIC_BASE_URL;
+  }
+});
+
+test('garment store lists the brand dresses from brand/dresses/', async () => {
+  const { http, json } = await call('GET', '/v1/garments');
+  assert.equal(http, 200);
+  const slugs = json.data.garments.map((g: { slug: string }) => g.slug);
+  assert.ok(slugs.includes('mint-green-dress'), `expected mint-green-dress in ${slugs}`);
+  assert.ok(slugs.includes('sky-blue-dress'), `expected sky-blue-dress in ${slugs}`);
+  // photo is served without auth, like generated images
+  const photo = await fetch(base + json.data.garments[0].image_url);
+  assert.equal(photo.status, 200);
+});
+
+test('generate with a garment that is not in the store is 422', async () => {
+  const { http, json } = await call('POST', '/v1/designs/generate', {
+    body: { kind: 'flyer', brief: 'sale flyer', garment: 'invented-dress-xyz' }
+  });
+  assert.equal(http, 422);
+  assert.equal(json.data.error.code, 'VALIDATION_FAILED');
+  assert.match(json.message, /garment must be one of/);
+});
+
 test('generation cap returns 429 GENERATION_LIMIT', async () => {
   // Set the cap to the count already generated, then try one more.
   const before = (await call('GET', '/v1/designs')).json.data.designs.length;
@@ -353,4 +416,103 @@ test('generation cap returns 429 GENERATION_LIMIT', async () => {
   } finally {
     delete process.env.MAE_MAX_GENERATIONS;
   }
+});
+
+test('logo stamping composites the real logo file onto a design', async () => {
+  const { default: sharp } = await import('sharp');
+  const { stampLogo } = await import('../src/logo.js');
+
+  const bg = { r: 250, g: 230, b: 240 };
+  const canvas = await sharp({
+    create: { width: 400, height: 500, channels: 3, background: bg }
+  })
+    .png()
+    .toBuffer();
+
+  const stamped = await stampLogo(canvas);
+  const meta = await sharp(stamped).metadata();
+  assert.equal(meta.format, 'png'); // stamped output is normalised to PNG
+
+  // Logo lands top-centre (18% width, 3.5% from the top) — that region must
+  // now contain real logo pixels, not the plain background.
+  const { data } = await sharp(stamped)
+    .extract({ left: 150, top: 10, width: 100, height: 80 })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const hasLogoPixels = Array.from(data).some((v, i) => {
+    const base = [bg.r, bg.g, bg.b][i % 3] as number;
+    return Math.abs(v - base) > 25;
+  });
+  assert.ok(hasLogoPixels, 'expected real logo pixels near the top-centre');
+});
+
+// --- MCP: two endpoints, two tool buckets ------------------------------------
+
+/** One JSON-RPC POST against an MCP endpoint; the reply arrives as SSE `data:` lines. */
+async function mcpCall(path: string, payload: Record<string, unknown>) {
+  const res = await fetch(base + path, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test_vending_key',
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream'
+    },
+    body: JSON.stringify(payload)
+  });
+  const text = await res.text();
+  const dataLine = text
+    .split('\n')
+    .filter((l) => l.startsWith('data:'))
+    .pop();
+  return { http: res.status, json: dataLine ? (JSON.parse(dataLine.slice(5)) as any) : null };
+}
+
+async function mcpToolNames(path: string): Promise<string[]> {
+  const init = await mcpCall(path, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'api-tests', version: '1.0.0' }
+    }
+  });
+  assert.equal(init.http, 200, `initialize on ${path}`);
+  const list = await mcpCall(path, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+  assert.equal(list.http, 200, `tools/list on ${path}`);
+  const tools = (list.json?.result?.tools ?? []) as { name: string }[];
+  return tools.map((t) => t.name);
+}
+
+test('MCP /mcp serves ONLY the ops bucket (no design tools)', async () => {
+  const names = await mcpToolNames('/mcp');
+  assert.deepEqual(
+    [...names].sort(),
+    [
+      'buy_airtime',
+      'buy_electricity',
+      'check_wallet',
+      'list_purchases',
+      'record_wallet_funding',
+      'validate_meter',
+      'validate_phone'
+    ].sort()
+  );
+  assert.ok(!names.includes('generate_design'), 'Kemi must not get design tools');
+});
+
+test('MCP /mcp/design serves ONLY the design bucket (no money tools)', async () => {
+  const names = await mcpToolNames('/mcp/design');
+  assert.deepEqual([...names].sort(), ['generate_design', 'list_designs', 'list_garments'].sort());
+  assert.ok(!names.includes('buy_airtime'), 'Mae must not get money tools');
+});
+
+test('MCP endpoints reject a missing bearer token', async () => {
+  const res = await fetch(base + '/mcp/design', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+  });
+  assert.equal(res.status, 401);
 });

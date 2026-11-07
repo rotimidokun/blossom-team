@@ -22,7 +22,10 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadDb, saveDb, resetDb } from './store.js';
-import { generateImage, isMockMode } from './imagegen.js';
+import { buildPrompt, generateImage, isMockMode } from './imagegen.js';
+import { mountMcp } from './mcp.js';
+import { GARMENTS_DIR, garmentReferenceDataUrl, listGarments } from './garments.js';
+import { stampLogo } from './logo.js';
 import type {
   AirtimePurchase,
   Db,
@@ -102,10 +105,10 @@ app.get('/v1/wallet', (req, res) => {
 // can never be counted twice:
 //   a) bank transfer (PUSH, the path that works today) -> owner sends to the
 //      biller account, we record detection via /v1/wallet/incoming
-//   b) Paystack pull (BLOCKED on our starter account) -> src/paystack.ts
-//      would move money, we'd record it via /v1/wallet/paystack-funded.
-//      Kept as the go-live upgrade path; see the transfer_unavailable note
-//      in src/paystack.ts and field-notes.md.
+//   b) Paystack pull (AVAILABLE since 2026-11-05 — Registered Business account
+//      lifted the starter payouts gate) -> src/paystack.ts moves money, we'd
+//      record it via /v1/wallet/paystack-funded. Test balance is currently
+//      ₦0, so push remains the demo path until test funds exist.
 
 function fundWallet(
   db: Db,
@@ -395,7 +398,47 @@ app.get('/images/:file', (req, res) => {
   res.sendFile(path);
 });
 
+// The garment store — the brand's real dresses, read from brand/dresses/.
+// Mae lists these first, the client picks one, and the photo is sent to the
+// image model as an input_reference so the design shows the actual dress.
+app.get('/v1/garments', (_req, res) => {
+  const garments = listGarments();
+  res.json(
+    envelope(
+      true,
+      garments.length
+        ? 'Garments retrieved'
+        : 'Garment store is empty — drop photos into brand/dresses/',
+      { garments }
+    )
+  );
+});
+
+/** Serve a garment photo by filename (no auth — shareable like /images). */
+app.get('/garments/:file', (req, res) => {
+  const file = req.params.file.replace(/[^a-zA-Z0-9._-]/g, ''); // no path traversal
+  const path = join(GARMENTS_DIR, file);
+  if (!existsSync(path)) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Garment not found'));
+  }
+  res.sendFile(path);
+});
+
 // Generate an image -> save file -> queue as pending.
+/**
+ * Absolute image URLs in API responses when PUBLIC_BASE_URL is set, so chat
+ * replies contain a clickable link instead of a bare "/images/..." path.
+ * The DB always stores the canonical relative path — only the response is
+ * rewritten (unset in tests and local dev -> unchanged behaviour).
+ */
+function withPublicImageUrl<T extends { image_url: string }>(design: T): T {
+  const base = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+  if (!base || !design.image_url || design.image_url.startsWith('http')) {
+    return design;
+  }
+  return { ...design, image_url: `${base}${design.image_url}` };
+}
+
 app.post('/v1/designs/generate', async (req, res) => {
   const db = loadDb();
   const { kind, brief, garment } = req.body || {};
@@ -425,41 +468,138 @@ app.post('/v1/designs/generate', async (req, res) => {
       );
   }
 
-  try {
-    const result = await generateImage({ kind, brief: brief.trim(), garment });
-
-    const id = `des_${randomUUID().slice(0, 8)}`;
-    const ext = result.mimeType === 'image/jpeg' ? 'jpg' : 'png';
-    const filename = `${id}.${ext}`;
-    mkdirSync(IMAGES_DIR, { recursive: true });
-    writeFileSync(join(IMAGES_DIR, filename), Buffer.from(result.imageBase64, 'base64'));
-
-    const design: Design = {
-      id,
-      kind,
-      brief: brief.trim(),
-      garment: garment || null,
-      prompt_used: result.prompt,
-      provider: result.provider,
-      model: result.model,
-      mock: result.mock,
-      image_file: filename,
-      image_url: `/images/${filename}`,
-      status: 'pending',
-      rejection_reason: null,
-      created_at: new Date().toISOString()
-    };
-    db.designs.push(design);
-    db.generation_count += 1;
-    saveDb(db);
-
-    res.status(201).json(envelope(true, 'Design created — queued for approval', { ...design }));
-  } catch (err) {
-    const e = err as Partial<ImageGenError>;
-    const code: ErrorCode = e.code || 'IMAGE_API_UNAVAILABLE';
-    const status = code === 'GENERATION_LIMIT' ? 429 : 503;
-    res.status(status).json(errorEnvelope(status, code, e.message || 'Image generation failed'));
+  // garment is a slug from GET /v1/garments — resolve it to the real photo.
+  let referenceUrls: string[] = [];
+  if (garment) {
+    const dataUrl = garmentReferenceDataUrl(String(garment));
+    if (!dataUrl) {
+      const available = listGarments()
+        .map((g) => g.slug)
+        .join(', ');
+      return res.status(422).json(
+        errorEnvelope(
+          422,
+          'VALIDATION_FAILED',
+          available
+            ? `garment must be one of: ${available}`
+            : `garment "${garment}" is not in the store — brand/dresses/ is empty`
+        )
+      );
+    }
+    referenceUrls = [dataUrl];
   }
+
+  const briefText = brief.trim();
+
+  // Same brief already generating? Chord retries when a connection drops —
+  // never let a retry double-generate (money) or double-count the cap.
+  const inFlight = db.designs.find(
+    (d) =>
+      d.status === 'creating' &&
+      d.kind === kind &&
+      d.brief === briefText &&
+      (d.garment || null) === (garment || null)
+  );
+  if (inFlight) {
+    return res.status(409).json(
+      errorEnvelope(
+        409,
+        'GENERATION_IN_PROGRESS',
+        `Design ${inFlight.id} for this exact brief is already generating — poll GET /v1/designs/${inFlight.id}`
+      )
+    );
+  }
+
+  // Create the record FIRST and answer immediately. The 15-45s image call
+  // runs in the background so no HTTP/MCP connection stays open long enough
+  // for a flaky link to kill the turn — 2026-11-05: synchronous generation
+  // over the ngrok tunnel produced 502s, "unexpected EOF", and an aborted
+  // process while Mae waited. Now the caller polls for image_url instead.
+  const id = `des_${randomUUID().slice(0, 8)}`;
+  const design: Design = {
+    id,
+    kind,
+    brief: briefText,
+    garment: garment || null,
+    prompt_used: buildPrompt({ kind, brief: briefText, garment }),
+    provider: '',
+    model: '',
+    mock: false,
+    image_file: '',
+    image_url: '',
+    status: 'creating',
+    rejection_reason: null,
+    created_at: new Date().toISOString()
+  };
+  db.designs.push(design);
+  db.generation_count += 1;
+  saveDb(db);
+
+  res
+    .status(201)
+    .json(
+      envelope(true, 'Design queued — generating now (15-45s); poll this design for image_url', {
+        ...withPublicImageUrl(design)
+      })
+    );
+
+  // Background generation — deliberately detached from the response above.
+  void (async () => {
+    try {
+      const result = await generateImage({
+        kind,
+        brief: briefText,
+        garment,
+        referenceUrls
+      });
+
+      let ext = result.mimeType === 'image/jpeg' ? 'jpg' : 'png';
+      let imageBuffer: Buffer = Buffer.from(result.imageBase64, 'base64');
+
+      // Stamp the REAL logo on top (guardrail #1) — the model is told never
+      // to draw it, so the only logo that ships is the actual file. Mock
+      // images skip this; a stamping failure never fails the generation.
+      if (!result.mock) {
+        try {
+          imageBuffer = await stampLogo(imageBuffer);
+          ext = 'png'; // stamped output is normalised to PNG
+        } catch (stampErr) {
+          console.warn(`[logo] stamp skipped: ${(stampErr as Error).message}`);
+        }
+      }
+
+      const filename = `${id}.${ext}`;
+      mkdirSync(IMAGES_DIR, { recursive: true });
+      writeFileSync(join(IMAGES_DIR, filename), imageBuffer);
+
+      const fresh = loadDb();
+      const record = fresh.designs.find((d) => d.id === id);
+      if (record) {
+        record.prompt_used = result.prompt;
+        record.provider = result.provider;
+        record.model = result.model;
+        record.mock = result.mock;
+        record.image_file = filename;
+        record.image_url = `/images/${filename}`;
+        record.status = 'pending';
+        saveDb(fresh);
+      }
+      console.log(`[design] ${id} ready (${result.provider}/${result.model})`);
+    } catch (err) {
+      const e = err as Partial<ImageGenError>;
+      const fresh = loadDb();
+      const record = fresh.designs.find((d) => d.id === id);
+      if (record) {
+        record.status = 'failed';
+        record.rejection_reason = e.message || 'Image generation failed';
+      }
+      // Failed generations are not charged by the provider — give the attempt
+      // back to the session cap.
+      fresh.generation_count = Math.max(0, fresh.generation_count - 1);
+      saveDb(fresh);
+      console.error(`[design] ${id} failed: ${e.message} (${e.code || 'IMAGE_API_UNAVAILABLE'})`);
+    }
+  })();
 });
 
 // The approval queue — filter with ?status=pending
@@ -467,7 +607,7 @@ app.get('/v1/designs', (req, res) => {
   const db = loadDb();
   const status = req.query.status;
   const designs = status ? db.designs.filter((d) => d.status === String(status)) : db.designs;
-  res.json(envelope(true, 'Designs retrieved', { designs }));
+  res.json(envelope(true, 'Designs retrieved', { designs: designs.map(withPublicImageUrl) }));
 });
 
 app.get('/v1/designs/:id', (req, res) => {
@@ -476,7 +616,7 @@ app.get('/v1/designs/:id', (req, res) => {
   if (!design) {
     return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Design not found'));
   }
-  res.json(envelope(true, 'Design retrieved', { ...design }));
+  res.json(envelope(true, 'Design retrieved', { ...withPublicImageUrl(design) }));
 });
 
 // Human flips pending -> approved (then posts manually).
@@ -494,7 +634,7 @@ app.post('/v1/designs/:id/approve', (req, res) => {
   design.status = 'approved';
   design.approved_at = new Date().toISOString();
   saveDb(db);
-  res.json(envelope(true, 'Design approved — ready to post', { ...design }));
+  res.json(envelope(true, 'Design approved — ready to post', { ...withPublicImageUrl(design) }));
 });
 
 // Human flips pending -> rejected, with a reason Mae can act on.
@@ -514,8 +654,13 @@ app.post('/v1/designs/:id/reject', (req, res) => {
   design.rejection_reason = reason || null;
   design.rejected_at = new Date().toISOString();
   saveDb(db);
-  res.json(envelope(true, 'Design rejected', { ...design }));
+  res.json(envelope(true, 'Design rejected', { ...withPublicImageUrl(design) }));
 });
+
+// --- MCP (Chord's tool surface) ---------------------------------------------
+// Stateless Streamable HTTP at POST /mcp — own Bearer auth, registered in
+// Admin -> Channels & Tools -> Custom tools (MCP). Tools self-call /v1 below.
+mountMcp(app);
 
 // --- unknown routes --------------------------------------------------------
 
