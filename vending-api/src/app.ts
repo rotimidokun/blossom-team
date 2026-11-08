@@ -1,9 +1,10 @@
 /**
  * Blossom by TC — mock vending API (Express).
  *
- * One server, two teammates' tools:
+ * One server, three teammates' tools:
  *   Kemi — wallet, validation, purchases (utility bills)
- *   Mae  — designs: generate -> approval queue -> approve/reject
+ *   Mae  — designs: generate -> link -> improve loop (no approval ceremony)
+ *   Ada  — sales: Paystack catalogue, orders, payment windows, customers
  *
  * Conventions, deliberately mirroring the APIs we studied:
  *  - Response envelope { status, message, data }  (Paystack-style)
@@ -24,17 +25,27 @@ import { fileURLToPath } from 'node:url';
 import { loadDb, saveDb, resetDb } from './store.js';
 import { buildPrompt, generateImage, isMockMode } from './imagegen.js';
 import { mountMcp } from './mcp.js';
+import {
+  getProduct,
+  initializeTransaction,
+  listProducts,
+  storefrontUrl,
+  updateProduct,
+  verifyTransaction
+} from './paystack.js';
 import { GARMENTS_DIR, garmentReferenceDataUrl, listGarments } from './garments.js';
 import { stampLogo } from './logo.js';
 import type {
   AirtimePurchase,
   Db,
+  Customer,
   Design,
   ElectricityPurchase,
   ErrorCode,
   ErrorEnvelope,
   FundingSource,
-  ImageGenError
+  ImageGenError,
+  Order
 } from './types.js';
 
 const API_KEY = process.env.VENDING_API_KEY || 'test_vending_key';
@@ -655,6 +666,385 @@ app.post('/v1/designs/:id/reject', (req, res) => {
   design.rejected_at = new Date().toISOString();
   saveDb(db);
   res.json(envelope(true, 'Design rejected', { ...withPublicImageUrl(design) }));
+});
+
+// --- Sales: catalogue (Paystack), orders, customers (Ada) ---------------------
+// Product truth (name/price/stock/photo) lives in PAYSTACK — external system,
+// agent-readable and agent-updatable. Orders/customers live here. Kobo in/out
+// (Paystack's NGN subunit is kobo too). Without PAYSTACK_SECRET_KEY the client
+// runs an in-process fixture, so tests never dial out.
+
+function paystackHttpError(res: Response, err: any): void {
+  if (err?.code === 'PAYSTACK_NOT_FOUND') {
+    res.status(404).json(errorEnvelope(404, 'NOT_FOUND', err.message || 'Not found'));
+    return;
+  }
+  res
+    .status(503)
+    .json(errorEnvelope(503, 'PAYSTACK_UNAVAILABLE', err?.message || 'Paystack request failed'));
+}
+
+// GET /v1/products — the catalogue Ada quotes from (+ the hosted shop link).
+app.get('/v1/products', async (_req, res) => {
+  try {
+    const products = await listProducts();
+    res.json(envelope(true, 'Products retrieved', { storefront_url: storefrontUrl(), products }));
+  } catch (err) {
+    paystackHttpError(res, err);
+  }
+});
+
+// GET /v1/products/:id — one product (photo, price, stock, buy link).
+app.get('/v1/products/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res
+      .status(422)
+      .json(errorEnvelope(422, 'VALIDATION_FAILED', 'product id must be a number'));
+  }
+  try {
+    res.json(envelope(true, 'Product retrieved', { product: await getProduct(id) }));
+  } catch (err) {
+    paystackHttpError(res, err);
+  }
+});
+
+// PUT /v1/products/:id — the agent's catalogue edit: change price in chat,
+// see it change in Paystack (the owner beat from the storyboard).
+app.put('/v1/products/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res
+      .status(422)
+      .json(errorEnvelope(422, 'VALIDATION_FAILED', 'product id must be a number'));
+  }
+  const body = req.body || {};
+  const patch: Record<string, unknown> = {};
+  if (body.price !== undefined) {
+    const price = Number(body.price);
+    if (!Number.isInteger(price) || price <= 0) {
+      return res
+        .status(422)
+        .json(errorEnvelope(422, 'VALIDATION_FAILED', 'price must be a positive integer in kobo'));
+    }
+    patch.price = price;
+  }
+  for (const field of ['name', 'description'] as const) {
+    if (body[field] !== undefined) {
+      if (typeof body[field] !== 'string' || !String(body[field]).trim()) {
+        return res
+          .status(422)
+          .json(errorEnvelope(422, 'VALIDATION_FAILED', `${field} must be a non-empty string`));
+      }
+      patch[field] = String(body[field]).trim();
+    }
+  }
+  if (body.quantity !== undefined) {
+    const qty = Number(body.quantity);
+    if (!Number.isInteger(qty) || qty < 0) {
+      return res
+        .status(422)
+        .json(errorEnvelope(422, 'VALIDATION_FAILED', 'quantity must be a whole number 0 or more'));
+    }
+    patch.quantity = qty;
+  }
+  if (Object.keys(patch).length === 0) {
+    return res
+      .status(422)
+      .json(
+        errorEnvelope(422, 'VALIDATION_FAILED', 'provide at least one of: price, name, description, quantity')
+      );
+  }
+  try {
+    const product = await updateProduct(id, patch);
+    res.json(envelope(true, 'Product updated', { product }));
+  } catch (err) {
+    paystackHttpError(res, err);
+  }
+});
+
+// POST /v1/orders — customer wants a product: record the order and open a
+// real Paystack payment window in one call. Retry-safe: an open order for the
+// same customer+product returns the existing one instead of doubling.
+app.post('/v1/orders', async (req, res) => {
+  const db = loadDb();
+  const body = req.body || {};
+  const productId = Number(body.product_id);
+  const name = typeof body.customer_name === 'string' ? body.customer_name.trim() : '';
+  const email = typeof body.customer_email === 'string' ? body.customer_email.trim().toLowerCase() : '';
+
+  if (!Number.isInteger(productId) || productId <= 0) {
+    return res
+      .status(422)
+      .json(errorEnvelope(422, 'VALIDATION_FAILED', 'product_id is required (Paystack product id)'));
+  }
+  if (!name) {
+    return res.status(422).json(errorEnvelope(422, 'VALIDATION_FAILED', 'customer_name is required'));
+  }
+  if (!/^\S+@\S+\.\S+$/.test(email)) {
+    return res
+      .status(422)
+      .json(errorEnvelope(422, 'VALIDATION_FAILED', 'customer_email must be an email address'));
+  }
+
+  let product;
+  try {
+    product = await getProduct(productId);
+  } catch (err) {
+    if ((err as any)?.code === 'PAYSTACK_NOT_FOUND') {
+      try {
+        const ids = (await listProducts()).map((p) => p.id).join(', ');
+        return res
+          .status(422)
+          .json(errorEnvelope(422, 'VALIDATION_FAILED', `product_id must be one of: ${ids}`));
+      } catch {
+        return paystackHttpError(res, err);
+      }
+    }
+    return paystackHttpError(res, err);
+  }
+
+  const existing = db.orders.find(
+    (o) =>
+      o.product_id === productId &&
+      o.customer_email === email &&
+      (o.status === 'pending' || o.status === 'offer_sent')
+  );
+  if (existing) {
+    return res.json(
+      envelope(true, 'An open order for this customer and product already exists', {
+        ...existing,
+        replay: true
+      })
+    );
+  }
+
+  // Optional size agreed in chat (the skill's age/measure chart) — recorded on
+  // the order; Paystack has no size field, so ours is the system of record.
+  const size =
+    typeof body.size === 'string' && body.size.trim() ? body.size.trim().slice(0, 24) : null;
+
+  const id = `OR_${randomUUID().slice(0, 8)}`;
+  // Test hook: email 'unpaid-…' opens a window that verifies as NOT paid, so
+  // the drop-off path is demoable without a real checkout (mirrors the seed's
+  // deliberate failure-path fixtures).
+  const reference = email.startsWith('unpaid-')
+    ? `unpaid-${id.slice(3)}`
+    : `blsm-or-${id.slice(3)}`;
+
+  let payment;
+  try {
+    payment = await initializeTransaction({
+      amountKobo: product.price,
+      email,
+      reference,
+      metadata: { order_id: id, product_id: productId }
+    });
+  } catch (err) {
+    return paystackHttpError(res, err);
+  }
+
+  const order: Order = {
+    id,
+    product_id: productId,
+    product_name: product.name,
+    amount: product.price,
+    currency: 'NGN',
+    customer_name: name,
+    customer_email: email,
+    size,
+    status: 'pending',
+    paystack_reference: payment.reference,
+    payment_url: payment.authorization_url,
+    link_attempts: 1,
+    discount_note: null,
+    created_at: new Date().toISOString()
+  };
+  db.orders.push(order);
+  saveDb(db);
+  res
+    .status(201)
+    .json(envelope(true, 'Order created — payment window is open', { order: { ...order } }));
+});
+
+// GET /v1/orders — pipeline view (?status=pending|offer_sent|paid|lead)
+app.get('/v1/orders', (req, res) => {
+  const db = loadDb();
+  const status = req.query.status;
+  if (status !== undefined) {
+    const allowed = ['pending', 'offer_sent', 'paid', 'lead'];
+    if (!allowed.includes(String(status))) {
+      return res
+        .status(422)
+        .json(errorEnvelope(422, 'VALIDATION_FAILED', `status must be one of: ${allowed.join(', ')}`));
+    }
+  }
+  const orders = status ? db.orders.filter((o) => o.status === String(status)) : db.orders;
+  res.json(envelope(true, 'Orders retrieved', { orders: orders.map((o) => ({ ...o })) }));
+});
+
+// GET /v1/orders/:id — one order.
+app.get('/v1/orders/:id', (req, res) => {
+  const db = loadDb();
+  const order = db.orders.find((o) => o.id === req.params.id);
+  if (!order) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Order not found'));
+  }
+  res.json(envelope(true, 'Order retrieved', { order: { ...order } }));
+});
+
+// POST /v1/orders/:id/payment-link — (re)open a payment window; optional
+// amount in kobo powers the 10%-off recovery offer from the storyboard.
+app.post('/v1/orders/:id/payment-link', async (req, res) => {
+  const db = loadDb();
+  const order = db.orders.find((o) => o.id === req.params.id);
+  if (!order) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Order not found'));
+  }
+  if (order.status === 'paid') {
+    return res
+      .status(409)
+      .json(errorEnvelope(409, 'INVALID_STATE', 'Order is already paid'));
+  }
+  const body = req.body || {};
+  if (body.amount !== undefined) {
+    const amount = Number(body.amount);
+    if (!Number.isInteger(amount) || amount <= 0) {
+      return res
+        .status(422)
+        .json(errorEnvelope(422, 'VALIDATION_FAILED', 'amount must be a positive integer in kobo'));
+    }
+    order.amount = amount;
+    if (body.note) order.discount_note = String(body.note);
+  }
+
+  const attempts = order.link_attempts + 1;
+  const reference = order.customer_email.startsWith('unpaid-')
+    ? `unpaid-${order.id.slice(3)}-${attempts}`
+    : `blsm-or-${order.id.slice(3)}-${attempts}`;
+
+  let payment;
+  try {
+    payment = await initializeTransaction({
+      amountKobo: order.amount,
+      email: order.customer_email,
+      reference,
+      metadata: { order_id: order.id, product_id: order.product_id }
+    });
+  } catch (err) {
+    return paystackHttpError(res, err);
+  }
+
+  order.paystack_reference = payment.reference;
+  order.payment_url = payment.authorization_url;
+  order.link_attempts = attempts;
+  saveDb(db);
+  res.json(
+    envelope(true, 'Payment window opened', { order: { ...order }, payment_url: payment.authorization_url })
+  );
+});
+
+// POST /v1/orders/:id/verify — did they actually pay? Only 'success' flips the
+// order; a verified customer is recorded as a Customer (or their count grows).
+app.post('/v1/orders/:id/verify', async (req, res) => {
+  const db = loadDb();
+  const order = db.orders.find((o) => o.id === req.params.id);
+  if (!order) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Order not found'));
+  }
+  if (order.status === 'paid') {
+    const customer = db.customers.find((c) => c.email === order.customer_email);
+    return res.json(
+      envelope(true, 'Order is already paid', { paid: true, order: { ...order }, customer: customer ? { ...customer } : null })
+    );
+  }
+  if (!order.paystack_reference) {
+    return res
+      .status(409)
+      .json(errorEnvelope(409, 'INVALID_STATE', 'No payment window has been opened for this order'));
+  }
+
+  const verification = await verifyTransaction(order.paystack_reference);
+  if (!verification.paid) {
+    return res.json(
+      envelope(true, 'Payment not confirmed yet', {
+        paid: false,
+        verification_status: verification.status,
+        order: { ...order }
+      })
+    );
+  }
+
+  order.status = 'paid';
+  order.paid_at = verification.paid_at || new Date().toISOString();
+
+  let customer = db.customers.find((c) => c.email === order.customer_email);
+  if (customer) {
+    customer.orders_count += 1;
+    customer.total_spent += order.amount;
+    customer.updated_at = new Date().toISOString();
+  } else {
+    customer = {
+      id: `cus_${randomUUID().slice(0, 8)}`,
+      name: order.customer_name,
+      email: order.customer_email,
+      orders_count: 1,
+      total_spent: order.amount,
+      created_at: new Date().toISOString()
+    };
+    db.customers.push(customer);
+  }
+  saveDb(db);
+  res.json(
+    envelope(true, 'Payment confirmed — order paid', {
+      paid: true,
+      order: { ...order },
+      customer: { ...customer }
+    })
+  );
+});
+
+// POST /v1/orders/:id/status — tag the pipeline: follow-up offer sent, or
+// drop-off (lead). Paid orders never change.
+app.post('/v1/orders/:id/status', (req, res) => {
+  const db = loadDb();
+  const order = db.orders.find((o) => o.id === req.params.id);
+  if (!order) {
+    return res.status(404).json(errorEnvelope(404, 'NOT_FOUND', 'Order not found'));
+  }
+  const { status, note } = req.body || {};
+  if (status !== 'offer_sent' && status !== 'lead') {
+    return res
+      .status(422)
+      .json(errorEnvelope(422, 'VALIDATION_FAILED', 'status must be one of: offer_sent, lead'));
+  }
+  if (order.status === 'paid') {
+    return res.status(409).json(errorEnvelope(409, 'INVALID_STATE', 'Order is already paid'));
+  }
+  if (order.status === status) {
+    return res.json(envelope(true, `Order is already marked ${status}`, { order: { ...order } }));
+  }
+  // pending -> offer_sent | lead ; lead <-> offer_sent (a new round); nothing else.
+  const allowed =
+    order.status === 'pending' ||
+    (order.status === 'offer_sent' && status === 'lead') ||
+    (order.status === 'lead' && status === 'offer_sent');
+  if (!allowed) {
+    return res
+      .status(409)
+      .json(errorEnvelope(409, 'INVALID_STATE', `Cannot move an order from ${order.status} to ${status}`));
+  }
+  order.status = status;
+  order.flagged_at = new Date().toISOString();
+  if (status === 'offer_sent' && note) order.discount_note = String(note);
+  saveDb(db);
+  res.json(envelope(true, `Order marked ${status}`, { order: { ...order } }));
+});
+
+// GET /v1/customers — everyone who has paid (the customers list).
+app.get('/v1/customers', (_req, res) => {
+  const db = loadDb();
+  res.json(envelope(true, 'Customers retrieved', { customers: db.customers.map((c) => ({ ...c })) }));
 });
 
 // --- MCP (Chord's tool surface) ---------------------------------------------

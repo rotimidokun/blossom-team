@@ -58,6 +58,18 @@ const OPS = [
   'list_purchases'
 ];
 const DESIGN = ['generate_design', 'list_designs', 'list_garments'];
+const SALES = [
+  'list_products',
+  'update_product',
+  'create_order',
+  'create_payment_link',
+  'verify_payment',
+  'get_order',
+  'list_orders',
+  'record_follow_up_offer',
+  'mark_drop_off',
+  'list_customers'
+];
 const eq = (a, b) => [...a].sort().join() === [...b].sort().join();
 
 let failed = false;
@@ -86,13 +98,24 @@ report(
   des.error || `${des.names?.length} tools`
 );
 
-// 4. no cross-contamination
+// 4. sales bucket
+const sales = await toolNames('/mcp/sales');
 report(
-  !(ops.names || []).includes('generate_design') && !(des.names || []).includes('buy_airtime'),
+  !sales.error && eq(sales.names || [], SALES),
+  'POST /mcp/sales = sales bucket only',
+  sales.error || `${sales.names?.length} tools`
+);
+
+// 5. no cross-contamination
+report(
+  !(ops.names || []).includes('generate_design') &&
+    !(des.names || []).includes('buy_airtime') &&
+    !(sales.names || []).includes('check_wallet') &&
+    !(ops.names || []).includes('list_products'),
   'no cross-contamination'
 );
 
-// 5. auth rejects without a token
+// 6. auth rejects without a token
 const un = await fetch(`${base}/mcp/design`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },

@@ -516,3 +516,154 @@ test('MCP endpoints reject a missing bearer token', async () => {
   });
   assert.equal(res.status, 401);
 });
+
+// --- sales: catalogue (Paystack fixture), orders, customers ------------------
+// No PAYSTACK_SECRET_KEY in tests -> paystack.ts runs its in-process fixture.
+
+test('products list comes from the catalogue with prices, photos and shop url', async () => {
+  const { http, json } = await call('GET', '/v1/products');
+  assert.equal(http, 200);
+  const products = json.data.products as any[];
+  assert.equal(products.length, 2);
+  const sky = products.find((p) => p.id === 2880906);
+  assert.ok(sky, 'sky blue dress should exist');
+  assert.equal(sky.price, 1250000); // kobo = NGN 12,500
+  assert.match(sky.photo_url, /^https:\/\//);
+  assert.match(sky.buy_url, /paystack\.com\/buy\//);
+  assert.equal(typeof json.data.storefront_url, 'string');
+});
+
+test('owner updates a price -> catalogue reflects it (agent edit path)', async () => {
+  const upd = await call('PUT', '/v1/products/2880907', { body: { price: 999900 } });
+  assert.equal(upd.http, 200);
+  assert.equal(upd.json.data.product.price, 999900);
+
+  const list = await call('GET', '/v1/products');
+  const mint = (list.json.data.products as any[]).find((p) => p.id === 2880907);
+  assert.equal(mint.price, 999900, 'the change must be readable afterwards');
+
+  const bad = await call('PUT', '/v1/products/2880907', { body: {} });
+  assert.equal(bad.http, 422);
+  const missing = await call('PUT', '/v1/products/999', { body: { price: 100 } });
+  assert.equal(missing.http, 404);
+});
+
+test('create order opens a payment window; duplicate open order replays', async () => {
+  const created = await call('POST', '/v1/orders', {
+    body: {
+      product_id: 2880906,
+      customer_name: 'Adaeze',
+      customer_email: 'adaeze@example.test',
+      size: '7–8 Years'
+    }
+  });
+  assert.equal(created.http, 201);
+  const order = created.json.data.order;
+  assert.equal(order.status, 'pending');
+  assert.equal(order.amount, 1250000);
+  assert.equal(order.size, '7–8 Years', 'the agreed size rides on the order');
+  assert.match(order.payment_url, /^https:\/\/checkout\.paystack\.com\//);
+  assert.ok(order.paystack_reference);
+
+  const again = await call('POST', '/v1/orders', {
+    body: { product_id: 2880906, customer_name: 'Adaeze', customer_email: 'adaeze@example.test' }
+  });
+  assert.equal(again.http, 200);
+  assert.equal(again.json.data.replay, true);
+  assert.equal(again.json.data.id, order.id, 'retry returns the same open order');
+});
+
+test('order validation: bad email 422, unknown product 422', async () => {
+  const badEmail = await call('POST', '/v1/orders', {
+    body: { product_id: 2880906, customer_name: 'X', customer_email: 'not-an-email' }
+  });
+  assert.equal(badEmail.http, 422);
+  const badProduct = await call('POST', '/v1/orders', {
+    body: { product_id: 42, customer_name: 'X', customer_email: 'x@example.test' }
+  });
+  assert.equal(badProduct.http, 422);
+  assert.match(badProduct.json.message, /product_id must be one of/);
+});
+
+test('verify payment: paid -> order paid + customer recorded (and stays idempotent)', async () => {
+  const created = await call('POST', '/v1/orders', {
+    body: { product_id: 2880906, customer_name: 'Chidi', customer_email: 'chidi@example.test' }
+  });
+  const id = created.json.data.order.id;
+
+  const verified = await call('POST', `/v1/orders/${id}/verify`);
+  assert.equal(verified.http, 200);
+  assert.equal(verified.json.data.paid, true);
+  assert.equal(verified.json.data.order.status, 'paid');
+  assert.ok(verified.json.data.order.paid_at);
+  assert.equal(verified.json.data.customer.email, 'chidi@example.test');
+  assert.equal(verified.json.data.customer.orders_count, 1);
+  assert.equal(verified.json.data.order.size, null, 'size is optional — absent when not given');
+
+  const again = await call('POST', `/v1/orders/${id}/verify`);
+  assert.equal(again.json.data.paid, true, 'verify on a paid order stays paid');
+
+  const customers = await call('GET', '/v1/customers');
+  const emails = (customers.json.data.customers as any[]).map((c) => c.email);
+  assert.ok(emails.includes('chidi@example.test'));
+
+  const flagged = await call('POST', `/v1/orders/${id}/status`, { body: { status: 'lead' } });
+  assert.equal(flagged.http, 409, 'paid orders never change');
+});
+
+test('drop-off path: not paid -> lead -> recovery offer -> new window', async () => {
+  const created = await call('POST', '/v1/orders', {
+    body: { product_id: 2880907, customer_name: 'Ngozi', customer_email: 'unpaid-ngozi@example.test' }
+  });
+  const id = created.json.data.order.id;
+
+  const verify = await call('POST', `/v1/orders/${id}/verify`);
+  assert.equal(verify.json.data.paid, false, 'unpaid window must not read as paid');
+  assert.equal(verify.json.data.verification_status, 'abandon');
+
+  const dropped = await call('POST', `/v1/orders/${id}/status`, { body: { status: 'lead' } });
+  assert.equal(dropped.http, 200);
+  assert.equal(dropped.json.data.order.status, 'lead');
+
+  const offered = await call('POST', `/v1/orders/${id}/status`, {
+    body: { status: 'offer_sent', note: '10% off if you pay today' }
+  });
+  assert.equal(offered.http, 200);
+  assert.equal(offered.json.data.order.status, 'offer_sent');
+  assert.equal(offered.json.data.order.discount_note, '10% off if you pay today');
+
+  const window = await call('POST', `/v1/orders/${id}/payment-link`, {
+    body: { amount: 1035000, note: '10% recovery offer' }
+  });
+  assert.equal(window.http, 200);
+  assert.equal(window.json.data.order.amount, 1035000, 'discounted amount applied');
+  assert.match(window.json.data.payment_url, /^https:\/\/checkout\.paystack\.com\//);
+  assert.equal(window.json.data.order.link_attempts, 2);
+
+  const filtered = await call('GET', '/v1/orders?status=offer_sent');
+  assert.ok((filtered.json.data.orders as any[]).some((o) => o.id === id));
+  const badFilter = await call('GET', '/v1/orders?status=weird');
+  assert.equal(badFilter.http, 422);
+});
+
+test('MCP /mcp/sales serves ONLY the sales bucket (10 tools)', async () => {
+  const names = await mcpToolNames('/mcp/sales');
+  assert.equal(names.length, 10);
+  assert.deepEqual(
+    [...names].sort(),
+    [
+      'create_order',
+      'create_payment_link',
+      'get_order',
+      'list_customers',
+      'list_orders',
+      'list_products',
+      'mark_drop_off',
+      'record_follow_up_offer',
+      'update_product',
+      'verify_payment'
+    ].sort()
+  );
+  assert.ok(!names.includes('check_wallet'), 'money tools are not hers');
+  assert.ok(!names.includes('generate_design'), 'design tools are not hers');
+});

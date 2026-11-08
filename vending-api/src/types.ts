@@ -111,6 +111,47 @@ export interface Design {
   rejected_at?: string;
 }
 
+// --- sales (Ada: products live in Paystack; orders/customers live here) -------
+
+export type OrderStatus = 'pending' | 'offer_sent' | 'paid' | 'lead';
+
+/**
+ * A sale in progress. Product truth (name/price/stock/photo) lives in
+ * Paystack; the order tracks the conversation-side state machine:
+ * pending -> offer_sent -> paid, with 'lead' for a drop-off that never paid.
+ */
+export interface Order {
+  id: string; // OR_xxxxxxxx
+  product_id: number; // Paystack product id
+  product_name: string;
+  amount: number; // kobo — what the customer must pay now
+  currency: 'NGN';
+  customer_name: string;
+  customer_email: string;
+  /** Chosen size from the skill's chart (e.g. "7-8y") — captured in chat. */
+  size: string | null;
+  status: OrderStatus;
+  /** Latest Paystack /transaction/initialize reference + checkout link. */
+  paystack_reference: string | null;
+  payment_url: string | null;
+  link_attempts: number; // how many payment windows we've opened
+  discount_note: string | null; // e.g. "10% recovery offer"
+  created_at: string;
+  flagged_at?: string; // when it became offer_sent or lead
+  paid_at?: string;
+}
+
+/** A customer record — created the moment a payment verifies. */
+export interface Customer {
+  id: string; // cus_xxxxxxxx
+  name: string;
+  email: string;
+  orders_count: number;
+  total_spent: number; // kobo
+  created_at: string;
+  updated_at?: string;
+}
+
 // --- database ---------------------------------------------------------------
 
 export interface Db {
@@ -122,6 +163,8 @@ export interface Db {
   /** Idempotency-Key header -> purchase id (safe retries, no double-buy). */
   idempotency: Record<string, string>;
   designs: Design[];
+  orders: Order[];
+  customers: Customer[];
   generation_count: number; // cost cap: images generated this session
 }
 
@@ -155,6 +198,7 @@ export type ErrorCode =
   | 'INVALID_STATE'
   | 'GENERATION_LIMIT'
   | 'GENERATION_IN_PROGRESS'
+  | 'PAYSTACK_UNAVAILABLE'
   | 'IMAGE_API_UNAVAILABLE'
   | 'NO_IMAGE_PROVIDER'
   | 'INTERNAL_ERROR';

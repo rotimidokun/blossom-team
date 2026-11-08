@@ -48,7 +48,7 @@ interface ApiResult {
 }
 
 async function api(
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'PUT',
   path: string,
   body?: Record<string, unknown>,
   idempotencyKey?: string
@@ -306,6 +306,194 @@ function registerDesign(server: McpServer): void {
   );
 }
 
+/** Sales bucket — served at POST /mcp/sales (assigned to Ada). */
+function registerSales(server: McpServer): void {
+  // --- Ada: catalogue (Paystack-backed) --------------------------------------
+  server.registerTool(
+    'list_products',
+    {
+      description:
+        'The real catalogue from Paystack: products with price (KOBO — divide by 100 for naira), stock, photo link, buy link, plus storefront_url (the hosted shop). ' +
+        'Call before quoting anything — never invent products or prices.',
+      inputSchema: {}
+    },
+    async () => toToolResult(await api('GET', '/v1/products'))
+  );
+
+  server.registerTool(
+    'update_product',
+    {
+      description:
+        'Change a product in the Paystack catalogue (only when the owner asks — e.g. drop the price). ' +
+        'price_naira is in NAIRA (converted to kobo). The change is visible immediately on list_products and the hosted shop. ' +
+        'Errors: 404 NOT_FOUND, 422 VALIDATION_FAILED, 503 PAYSTACK_UNAVAILABLE.',
+      inputSchema: {
+        product_id: z.number().int().positive(),
+        price_naira: z.number().positive().optional().describe('New price in naira'),
+        name: z.string().min(1).optional(),
+        description: z.string().min(1).optional(),
+        quantity: z.number().int().min(0).optional().describe('Stock count')
+      }
+    },
+    async (args: ToolArgs) => {
+      const a = args as {
+        product_id: number;
+        price_naira?: number;
+        name?: string;
+        description?: string;
+        quantity?: number;
+      };
+      const patch: Record<string, unknown> = {};
+      if (a.price_naira !== undefined) patch.price = kobo(a.price_naira);
+      if (a.name !== undefined) patch.name = a.name;
+      if (a.description !== undefined) patch.description = a.description;
+      if (a.quantity !== undefined) patch.quantity = a.quantity;
+      return toToolResult(await api('PUT', `/v1/products/${a.product_id}`, patch));
+    }
+  );
+
+  // --- Ada: orders + payment windows -----------------------------------------
+  server.registerTool(
+    'create_order',
+    {
+      description:
+        'Record that a customer wants a product AND open their Paystack payment window in one step. ' +
+        'Include the agreed size from your size chart when you have it. ' +
+        'Returns the order (status pending, amount in kobo, size) and payment_url to share with them. Retry-safe: an already-open order for the same customer+product ' +
+        'comes back with replay: true instead of a duplicate. Amount always comes from the catalogue — never type your own price. ' +
+        'Errors: 422 VALIDATION_FAILED (bad product id or email), 503 PAYSTACK_UNAVAILABLE.',
+      inputSchema: {
+        product_id: z.number().int().positive().describe('Product id from list_products'),
+        customer_name: z.string().min(1),
+        customer_email: z.string().regex(/^\S+@\S+\.\S+$/, 'must be an email address'),
+        size: z.string().max(24).optional().describe('Agreed size from your UK chart, e.g. "7–8 Years" or "UK 8"')
+      }
+    },
+    async (args: ToolArgs) => {
+      const a = args as {
+        product_id: number;
+        customer_name: string;
+        customer_email: string;
+        size?: string;
+      };
+      return toToolResult(
+        await api('POST', '/v1/orders', {
+          product_id: a.product_id,
+          customer_name: a.customer_name,
+          customer_email: a.customer_email,
+          ...(a.size ? { size: a.size } : {})
+        })
+      );
+    }
+  );
+
+  server.registerTool(
+    'create_payment_link',
+    {
+      description:
+        '(Re)open a payment window for an order — used for follow-up/recovery offers. ' +
+        'amount_naira (optional) overrides the amount — pass the discounted price and note the offer, e.g. note "10% off recovery offer". ' +
+        'Returns the fresh payment_url. Never opens a window on a paid order (409 INVALID_STATE).',
+      inputSchema: {
+        order_id: z.string().min(3),
+        amount_naira: z.number().positive().optional().describe('Discounted amount in naira'),
+        note: z.string().max(140).optional().describe('What this offer is, e.g. "10% off"')
+      }
+    },
+    async (args: ToolArgs) => {
+      const a = args as { order_id: string; amount_naira?: number; note?: string };
+      const body: Record<string, unknown> = {};
+      if (a.amount_naira !== undefined) body.amount = kobo(a.amount_naira);
+      if (a.note !== undefined) body.note = a.note;
+      return toToolResult(await api('POST', `/v1/orders/${a.order_id}/payment-link`, body));
+    }
+  );
+
+  server.registerTool(
+    'verify_payment',
+    {
+      description:
+        'Ask Paystack whether the customer ACTUALLY paid for an order. Only a paid: true response means success — ' +
+        'then the order flips to paid and the customer is recorded (or their total grows). ' +
+        'paid: false comes with verification_status (abandon/pending/unverifiable) — report it plainly and never claim a payment that is not verified. Errors: 404 NOT_FOUND.',
+      inputSchema: { order_id: z.string().min(3) }
+    },
+    async (args: ToolArgs) =>
+      toToolResult(await api('POST', `/v1/orders/${(args as { order_id: string }).order_id}/verify`))
+  );
+
+  server.registerTool(
+    'get_order',
+    {
+      description: 'One order with its full state: pending / offer_sent / paid / lead, amount (kobo), payment_url, references.',
+      inputSchema: { order_id: z.string().min(3) }
+    },
+    async (args: ToolArgs) =>
+      toToolResult(await api('GET', `/v1/orders/${(args as { order_id: string }).order_id}`))
+  );
+
+  server.registerTool(
+    'list_orders',
+    {
+      description:
+        'The sales pipeline. No status = everything; status = one slice: pending (awaiting payment), ' +
+        'offer_sent (follow-up sent), paid (done), lead (dropped off — recovery targets). Amounts in kobo.',
+      inputSchema: {
+        status: z.enum(['pending', 'offer_sent', 'paid', 'lead']).optional()
+      }
+    },
+    async (args: ToolArgs) => {
+      const { status } = args as { status?: string };
+      return toToolResult(await api('GET', `/v1/orders${status ? `?status=${status}` : ''}`));
+    }
+  );
+
+  server.registerTool(
+    'record_follow_up_offer',
+    {
+      description:
+        'Mark an order as offer_sent — ONLY after you actually sent the recovery/follow-up offer to the customer. ' +
+        'Moves pending or lead -> offer_sent (repeat-safe). Paid orders cannot change (409 INVALID_STATE).',
+      inputSchema: {
+        order_id: z.string().min(3),
+        note: z.string().max(140).optional().describe('The offer, e.g. "10% off if you pay today"')
+      }
+    },
+    async (args: ToolArgs) => {
+      const a = args as { order_id: string; note?: string };
+      const body: Record<string, unknown> = { status: 'offer_sent' };
+      if (a.note !== undefined) body.note = a.note;
+      return toToolResult(await api('POST', `/v1/orders/${a.order_id}/status`, body));
+    }
+  );
+
+  server.registerTool(
+    'mark_drop_off',
+    {
+      description:
+        'Tag an order whose payment window lapsed with no payment: it becomes a lead (recovery target). ' +
+        'Moves pending or offer_sent -> lead. Never on a paid order (409 INVALID_STATE).',
+      inputSchema: { order_id: z.string().min(3) }
+    },
+    async (args: ToolArgs) =>
+      toToolResult(
+        await api('POST', `/v1/orders/${(args as { order_id: string }).order_id}/status`, { status: 'lead' })
+      )
+  );
+
+  // --- Ada: customers ---------------------------------------------------------
+  server.registerTool(
+    'list_customers',
+    {
+      description:
+        'Everyone who has completed a payment: name, email, order count, total spent (kobo). ' +
+        'Customers appear here automatically when verify_payment succeeds — never invent people.',
+      inputSchema: {}
+    },
+    async () => toToolResult(await api('GET', '/v1/customers'))
+  );
+}
+
 /**
  * Mount the MCP endpoints on the existing Express app.
  * Mounted OUTSIDE the /v1 auth middleware — each path checks the Bearer itself.
@@ -369,11 +557,12 @@ export function mountMcp(app: Express): void {
     });
   };
 
-  // Two buckets, two Chord server registrations — least privilege per teammate.
+  // Three buckets, three Chord server registrations — least privilege per teammate.
   mountEndpoint('/mcp', 'blossom-vending-api', registerOps);
   mountEndpoint('/mcp/design', 'blossom-design-api', registerDesign);
+  mountEndpoint('/mcp/sales', 'blossom-sales-api', registerSales);
 
   console.log(
-    '[mcp] mounted: POST /mcp (ops: wallet/validate/purchases) + POST /mcp/design (designs/garments) — stateless streamable HTTP'
+    '[mcp] mounted: POST /mcp (ops) + POST /mcp/design (designs) + POST /mcp/sales (catalogue/orders/payments) — stateless streamable HTTP'
   );
 }

@@ -54,6 +54,8 @@ export function buildSeed(): Db {
     incoming: [], // recorded wallet credits (bank transfer or Paystack-funded)
     idempotency: {},
     designs: [], // Mae's approval queue: created -> pending -> approved/rejected
+    orders: [], // Ada's sales pipeline: pending -> offer_sent -> paid / lead
+    customers: [], // created when a payment verifies
     generation_count: 0 // cost cap: how many images generated this session
   };
 }
