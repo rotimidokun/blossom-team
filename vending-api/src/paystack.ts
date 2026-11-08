@@ -67,16 +67,31 @@ async function paystackCall(
     );
   }
 
-  const response = await fetch(`${PAYSTACK_BASE}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json'
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
+  // Diagnostic log (2026-11-08): a create_order turn hung 304s and surfaced as
+  // "Local vending API unreachable: fetch failed". Every Paystack call now logs
+  // its elapsed time and error cause so a hang is attributable to this hop.
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(`${PAYSTACK_BASE}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json'
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (err) {
+    const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+    console.error(
+      `[paystack] ${method} ${path} FAILED after ${Date.now() - startedAt}ms: ` +
+        `${(err as Error).message}${cause ? ` (cause: ${cause.code || cause.message})` : ''}`
+    );
+    throw err;
+  }
 
   const json = (await response.json()) as PaystackEnvelope;
+  console.log(`[paystack] ${method} ${path} -> HTTP ${response.status} in ${Date.now() - startedAt}ms`);
   if (!json.status) {
     throw fail(json.message || 'Paystack request failed', 'PAYSTACK_ERROR', json);
   }

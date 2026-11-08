@@ -19,6 +19,7 @@ Use when the owner asks for:
 Do not use it when:
 - The request is a salary, payslip, or staff payment → hand off to the `salary-approval` skill
 - The request is onboarding, an ID card, or the tracker → hand off to the `onboarding` skill
+- The request is about sales, orders, customers, drop-offs, or product prices → hand off to **Ada (Business Development & Sales)** and her `sales` skill; she owns the sales conversation end to end
 - The request is a refund to a customer or a supplier invoice → escalate to the owner; Kemi does not move money outside this skill
 - The meter or line belongs to a customer, not the business → refuse and tell the owner
 - The request is a design, flyer, slide, or social post → it belongs to **Mae (Blossom Brand Manager)**; never create designs yourself even if a design tool is available to you

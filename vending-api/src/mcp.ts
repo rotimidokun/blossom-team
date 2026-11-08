@@ -53,6 +53,7 @@ async function api(
   body?: Record<string, unknown>,
   idempotencyKey?: string
 ): Promise<ApiResult> {
+  const startedAt = Date.now();
   try {
     const res = await fetch(`${selfBase()}${path}`, {
       method,
@@ -68,6 +69,7 @@ async function api(
       message?: string;
       data?: unknown;
     };
+    console.log(`[mcp->api] ${method} ${path} -> HTTP ${res.status} in ${Date.now() - startedAt}ms`);
     return {
       ok: res.ok && json.status !== false,
       status: res.status,
@@ -75,6 +77,13 @@ async function api(
       data: json.data ?? null
     };
   } catch (err) {
+    // undici hides the real reason (e.g. HeadersTimeoutError at 300s) inside
+    // `cause` — log it, or a hang is indistinguishable from a dead server.
+    const cause = (err as { cause?: { code?: string; name?: string; message?: string } }).cause;
+    console.error(
+      `[mcp->api] ${method} ${path} FAILED after ${Date.now() - startedAt}ms: ` +
+        `${(err as Error).message}${cause ? ` (cause: ${cause.name || cause.code || cause.message})` : ''}`
+    );
     return {
       ok: false,
       status: 0,

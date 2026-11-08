@@ -767,6 +767,8 @@ app.put('/v1/products/:id', async (req, res) => {
 // real Paystack payment window in one call. Retry-safe: an open order for the
 // same customer+product returns the existing one instead of doubling.
 app.post('/v1/orders', async (req, res) => {
+  const startedAt = Date.now();
+  console.log(`[orders] POST /v1/orders received`);
   const db = loadDb();
   const body = req.body || {};
   const productId = Number(body.product_id);
@@ -862,6 +864,7 @@ app.post('/v1/orders', async (req, res) => {
   };
   db.orders.push(order);
   saveDb(db);
+  console.log(`[orders] ${id} created in ${Date.now() - startedAt}ms`);
   res
     .status(201)
     .json(envelope(true, 'Order created — payment window is open', { order: { ...order } }));
