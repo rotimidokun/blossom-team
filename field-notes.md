@@ -126,6 +126,14 @@ I tried three account/bank pairs: made-up `1234567890` @ Sterling (`232`), `0000
 **Severity:** minor (blocked 10 minutes, workaround solid)
 **Status:** resolved
 
+### 2026-11-08 — A stale DB file crashed an async route; a 300s timeout disguised it as "server unreachable"
+**What happened:** A live chat test failed at `create_order`: the MCP tool returned `{"ok": false, "http_status": 0, "message": "Local vending API unreachable: fetch failed"}` after **304 seconds**, and the teammate then went silent ("The agent didn't answer"). Two such calls took 304.6s and 305.0s (ngrok inspector); three other tools on the same endpoint answered in ~0.7s.
+**Cause (how I worked it out):** The message looked like a dead server, but the server was serving the other tools. I added elapsed-time logging to all three hops (Paystack client, MCP→REST loopback, order route) and re-ran the call. The log showed the truth immediately: `[fatal] unhandledRejection: TypeError: Cannot read properties of undefined (reading 'find') at app.ts:809` — `db.orders.find(...)`. The live `data/db.json` predated the sales feature (no `orders`/`customers` keys) and `loadDb()` returned old files verbatim. The async Express handler threw, Express 4 doesn't catch async throws, so **no response was ever written**, and the loopback fetch died on undici's default **300-second headers timeout** — which surfaces only as `fetch failed`. The 304s duration *was* the diagnosis; my first hypothesis (a Paystack network hang) was disproven by the same logs.
+**Fix / workaround:** (1) `loadDb()` now normalizes any loaded file over a fresh seed — missing collections are merged in (and backfilled on disk), so an old file can never crash a new route. (2) Every hop logs elapsed ms and error `cause`, so the next hang is attributable in one read. (3) The skill now forbids quoting an order id the tool didn't return — the crash had produced a "phantom order" the agent quoted to a customer. Gate: `tsc` clean, 44/44 tests, probe ALL GREEN through the tunnel.
+**Chord improvement suggestion:** (1) Surface the tool call's **elapsed time and underlying error** in the turn log — "304s, fetch failed" would have pointed at a hang in seconds instead of an error that reads like a dead server. (2) A **configurable MCP tool timeout** (30–60s default) with a clear `tool timeout` error would stop a 5-minute call from killing the whole reply. (3) When a turn produces no reply, show *why* (tool error / model error / gate) instead of the generic "The agent didn't answer".
+**Severity:** major (blocked the core purchase demo; root cause read from logs, not guesswork)
+**Status:** resolved (fix shipped in `2cf5932`; Chord-side asks folded into the TSG report)
+
 ---
 
 ## Ideas / decisions log
