@@ -17,3 +17,8 @@ Thumbs.db
 
 # Local tunnel binary (downloaded, not source)
 vending-api/bin/
+
+# Working artifacts (tunnel captures, probes, server logs — not source)
+ngrok-*.json
+vending-api/probe-order.out
+vending-api/server.log

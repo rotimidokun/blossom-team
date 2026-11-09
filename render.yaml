@@ -1,0 +1,43 @@
+# Render Blueprint — Blossom Vending API (the TSG Labs / Chord demo)
+#
+# Deploy: Render dashboard → New → Blueprint → point at this repo.
+# The whole repo is checked out (rootDir only sets the working directory), so
+# brand/dresses and brand/blossom-logo.jpg resolve exactly as they do locally
+# (src/ -> ../.. -> repo root /brand).
+#
+# Secrets are NOT in this file (.env is gitignored) — paste them into the
+# Render env-var fields (copy values from vending-api/.env):
+#   VENDING_API_KEY, PAYSTACK_SECRET_KEY, PAYSTACK_RECIPIENT,
+#   PAYSTACK_STOREFRONT_URL, OPENROUTER_API_KEY, OWNER_CODE, PUBLIC_BASE_URL
+#
+# NODE_ENV is deliberately UNSET: this is a test/demo deployment, so
+# POST /v1/reset stays enabled for cleaning state before recordings.
+# (Set NODE_ENV=production only for a real go-live — see the go-live note.)
+services:
+  - type: web
+    name: blossom-vending-api
+    runtime: node
+    rootDir: vending-api
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: SALARY_SOURCE
+        value: wallet # flip to "paystack" when Paystack's transfer channel unblocks
+      - key: MAE_MAX_GENERATIONS
+        value: "50"
+      # Secrets — sync: false means "I'll type them into the dashboard":
+      - key: VENDING_API_KEY
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_RECIPIENT
+        sync: false
+      - key: PAYSTACK_STOREFRONT_URL
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OWNER_CODE
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false # set to https://<this-service>.onrender.com after first deploy
