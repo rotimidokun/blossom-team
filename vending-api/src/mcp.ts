@@ -291,7 +291,7 @@ function registerOps(server: McpServer): void {
     'list_salaries',
     {
       description:
-        'Salary history: each attempt with month, amount (kobo), status paid/failed, transfer reference/code or failure reason. ' +
+        'Salary history: each attempt with month, amount (kobo), status paid/failed, source (wallet/paystack), transfer reference/code or failure reason. ' +
         'Filter by staff_id and/or month; no filter = everything (the payslip audit trail).',
       inputSchema: {
         staff_id: z.string().optional(),
@@ -308,6 +308,19 @@ function registerOps(server: McpServer): void {
         .join('&');
       return toToolResult(await api('GET', `/v1/salaries${query ? `?${query}` : ''}`));
     }
+  );
+
+  server.registerTool(
+    'check_paystack_balance',
+    {
+      description:
+        'The business Paystack bank balance (test mode), in KOBO — divide by 100 for naira. ' +
+        'This is the BANK, a different pot from the vending wallet (check_wallet): payroll and transfers draw on the bank, ' +
+        'airtime/electricity draw on the wallet. Use it to answer "what is the Paystack balance?" and to explain a failed transfer. ' +
+        'Errors: 503 PAYSTACK_UNAVAILABLE (key missing or Paystack unreachable).',
+      inputSchema: {}
+    },
+    async () => toToolResult(await api('GET', '/v1/paystack/balance'))
   );
 }
 

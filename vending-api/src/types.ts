@@ -171,9 +171,11 @@ export interface Staff {
 }
 
 /**
- * One salary attempt. `paid` only when Paystack's transfer succeeded —
- * a failed transfer is recorded as `failed` with the reason, never as a
- * payslip (skill rule: never claim money that isn't confirmed).
+ * One salary attempt. `paid` only when money actually moved — either the
+ * vending wallet debit (`source: 'wallet'`, the demo path while Paystack's
+ * test transfer channel is blocked, see SALARY_SOURCE) or a real Paystack
+ * transfer (`source: 'paystack'`). A failure is recorded as `failed` with the
+ * reason, never as a payslip (skill rule: never claim money that isn't confirmed).
  */
 export interface SalaryPayment {
   id: string; // sal_xxxxxxxx
@@ -183,8 +185,9 @@ export interface SalaryPayment {
   currency: 'NGN';
   month: string; // YYYY-MM
   status: 'paid' | 'failed';
+  source: 'wallet' | 'paystack';
   transfer_reference: string | null;
-  transfer_code: string | null;
+  transfer_code: string | null; // null on wallet payments (no Paystack transfer)
   failure_reason: string | null;
   created_at: string;
 }

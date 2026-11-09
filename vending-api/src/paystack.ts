@@ -100,11 +100,20 @@ async function paystackCall(
 
 /** GET /balance — available balance per currency (kobo for NGN). */
 export async function checkBalance(): Promise<{ balance: number; currency: string }> {
+  // No key (tests / local fixture): mirror the real test balance so the tool's
+  // shape is testable without dialing out (same convention as the catalogue).
+  if (mockMode()) {
+    return { balance: 11600000, currency: 'NGN' }; // NGN 116,000 in kobo
+  }
   const data = await paystackCall('GET', '/balance');
-  // Response: { balance, currency, ... } possibly wrapped in an array
+  // Response: { balance, currency, ... } possibly wrapped in an array.
+  // balance is ALREADY in kobo (NGN subunit) — verified live 2026-11-09:
+  // three test sales totalling NGN 116,000 reported balance 11600000.
+  // (The old `* 100` here overstated the balance 100x — caught by the live
+  // route right after the check_paystack_balance tool shipped.)
   const entry = Array.isArray(data) ? data[0] : data;
   return {
-    balance: Math.round(Number(entry.balance) * 100), // naira -> kobo
+    balance: Math.round(Number(entry.balance)),
     currency: entry.currency || 'NGN'
   };
 }
@@ -132,6 +141,11 @@ export async function transfer({
   reference,
   reason
 }: TransferArgs): Promise<TransferResult> {
+  // NOTE (2026-11-09): Paystack's test transfer channel currently rejects every
+  // send to our (active, correct) recipient — "Sorry, We can't make the transfer
+  // to this recipient at the moment" (403, code unknown), reproduced from the
+  // Paystack dashboard itself. Payroll therefore pays from the vending wallet
+  // (SALARY_SOURCE=wallet); flip to 'paystack' when the channel works again.
   // No key (tests / local fixture): succeed in-process so the payday flow is
   // testable without dialing out. Test hook: MOCK_TRANSFER_FAIL=1 simulates an
   // empty balance so the failure path (recorded, never a fake payslip) is covered.

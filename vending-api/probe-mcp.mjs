@@ -58,7 +58,8 @@ const OPS = [
   'list_purchases',
   'list_staff',
   'pay_salaries',
-  'list_salaries'
+  'list_salaries',
+  'check_paystack_balance'
 ];
 const DESIGN = ['generate_design', 'list_designs', 'list_garments'];
 const SALES = [

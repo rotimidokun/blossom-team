@@ -26,6 +26,7 @@ import { loadDb, saveDb, resetDb } from './store.js';
 import { buildPrompt, generateImage, isMockMode } from './imagegen.js';
 import { mountMcp } from './mcp.js';
 import {
+  checkBalance,
   getProduct,
   initializeTransaction,
   listProducts,
@@ -1070,13 +1071,38 @@ app.get('/v1/customers', (_req, res) => {
   res.json(envelope(true, 'Customers retrieved', { customers: db.customers.map((c) => ({ ...c })) }));
 });
 
+// --- Paystack bank balance (the OTHER pot of money) ---------------------------
+// The vending wallet is petty cash; this is the bank. Kemi could pay from one
+// and be blind to the other — this route (and check_paystack_balance) closes
+// that gap. Balance is kobo (Paystack convention).
+app.get('/v1/paystack/balance', async (_req, res) => {
+  try {
+    const balance = await checkBalance();
+    res.json(
+      envelope(true, 'Paystack balance retrieved', {
+        balance: balance.balance,
+        currency: balance.currency
+      })
+    );
+  } catch (err) {
+    paystackHttpError(res, err);
+  }
+});
+
 // --- Staff & salaries (Kemi: one monthly payday run, owner-code gated) --------
-// The three AI teammates ARE the staff; the owner is not on payroll. The run
-// pays every staff member for a month in one call (one Paystack transfer each,
-// same day — how payroll actually works). The OWNER_CODE must match before any
-// money moves: the server checks the code, never the agent's judgement.
-// Every attempt is recorded — `paid` (transfer ok) or `failed` (exact reason);
-// a failed transfer is never dressed up as a payslip.
+// Payroll pays the FOUNDER's monthly draw. The run pays every staff member for
+// a month in one call. The OWNER_CODE must match before any money moves: the
+// server checks the code, never the agent's judgement. Every attempt is
+// recorded — `paid` (money actually moved) or `failed` (exact reason); a
+// failure is never dressed up as a payslip.
+//
+// WHERE the money comes from (SALARY_SOURCE):
+//   'wallet'   (default, current demo) — debit the vending wallet (petty cash).
+//               Needed because Paystack's test transfer channel rejects every
+//               send as of 2026-11-09 (403 "can't make the transfer to this
+//               recipient", reproduced from Paystack's own dashboard).
+//   'paystack' — real POST /transfer from the bank balance; flip .env when the
+//               channel works again (zero code changes).
 
 /** YYYY-MM, e.g. 2026-11. */
 function isValidMonth(m: string): boolean {
@@ -1149,35 +1175,21 @@ app.post('/v1/salaries', async (req, res) => {
       continue;
     }
 
-    // Unique reference per attempt — Paystack rejects duplicate references.
+    // Unique reference per attempt (Paystack rejects duplicate references).
     const attempts =
       db.salaries.filter((s) => s.staff_id === member.id && s.month === month).length + 1;
     const reference =
       attempts > 1 ? `sal-${member.id}-${month}-${attempts}` : `sal-${member.id}-${month}`;
 
+    const usePaystack = process.env.SALARY_SOURCE === 'paystack';
     let record: SalaryPayment;
-    try {
-      const transferResult = await transfer({
-        amountKobo: member.salary,
-        reference,
-        reason: `${month} salary — ${member.name} (${member.role})`
-      });
-      record = {
-        id: `sal_${randomUUID().slice(0, 8)}`,
-        staff_id: member.id,
-        staff_name: member.name,
-        amount: member.salary,
-        currency: 'NGN',
-        month,
-        status: 'paid',
-        transfer_reference: transferResult.reference,
-        transfer_code: transferResult.transfer_code,
-        failure_reason: null,
-        created_at: new Date().toISOString()
-      };
-      console.log(`[salary] ${member.name} ${month} PAID ${member.salary / 100} NGN (${transferResult.transfer_code})`);
-    } catch (err) {
-      const reason = (err as Error).message || 'Transfer failed';
+
+    if (!usePaystack && db.wallet.balance < member.salary) {
+      // Petty-cash path: the wallet can't cover it — record the attempt as
+      // failed with the exact truth. No money moves; retryable after funding.
+      const reason =
+        `Vending wallet balance ${naira(db.wallet.balance)} is below the salary amount ` +
+        `${naira(member.salary)} — fund the wallet first`;
       record = {
         id: `sal_${randomUUID().slice(0, 8)}`,
         staff_id: member.id,
@@ -1186,12 +1198,71 @@ app.post('/v1/salaries', async (req, res) => {
         currency: 'NGN',
         month,
         status: 'failed',
-        transfer_reference: reference,
+        source: 'wallet',
+        transfer_reference: null,
         transfer_code: null,
         failure_reason: reason,
         created_at: new Date().toISOString()
       };
       console.error(`[salary] ${member.name} ${month} FAILED: ${reason}`);
+    } else {
+      try {
+        let source: 'wallet' | 'paystack';
+        let transferReference: string;
+        let transferCode: string | null = null;
+
+        if (usePaystack) {
+          const transferResult = await transfer({
+            amountKobo: member.salary,
+            reference,
+            reason: `${month} salary — ${member.name} (${member.role})`
+          });
+          source = 'paystack';
+          transferReference = transferResult.reference;
+          transferCode = transferResult.transfer_code;
+        } else {
+          // Petty-cash path: debit the wallet (the money really moves, in-ledger).
+          db.wallet.balance -= member.salary;
+          source = 'wallet';
+          transferReference = `wal-${member.id}-${month}`;
+        }
+
+        record = {
+          id: `sal_${randomUUID().slice(0, 8)}`,
+          staff_id: member.id,
+          staff_name: member.name,
+          amount: member.salary,
+          currency: 'NGN',
+          month,
+          status: 'paid',
+          source,
+          transfer_reference: transferReference,
+          transfer_code: transferCode,
+          failure_reason: null,
+          created_at: new Date().toISOString()
+        };
+        console.log(
+          `[salary] ${member.name} ${month} PAID ${member.salary / 100} NGN from ${source}` +
+            ` (${transferCode || transferReference})`
+        );
+      } catch (err) {
+        const reason = (err as Error).message || 'Transfer failed';
+        record = {
+          id: `sal_${randomUUID().slice(0, 8)}`,
+          staff_id: member.id,
+          staff_name: member.name,
+          amount: member.salary,
+          currency: 'NGN',
+          month,
+          status: 'failed',
+          source: 'paystack',
+          transfer_reference: reference,
+          transfer_code: null,
+          failure_reason: reason,
+          created_at: new Date().toISOString()
+        };
+        console.error(`[salary] ${member.name} ${month} FAILED: ${reason}`);
+      }
     }
     db.salaries.push(record);
     results.push(record);
@@ -1212,6 +1283,8 @@ app.post('/v1/salaries', async (req, res) => {
       paid,
       failed,
       skipped,
+      paid_from: process.env.SALARY_SOURCE === 'paystack' ? 'paystack' : 'wallet',
+      wallet_balance_after: db.wallet.balance,
       total_paid_kobo: results
         .filter((r) => r.status === 'paid')
         .reduce((sum, r) => sum + r.amount, 0),

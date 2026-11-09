@@ -25,7 +25,7 @@ Do not use it when:
 - The request is a design, flyer, slide, or social post → it belongs to **Mae (Blossom Brand Manager)**; never create designs yourself even if a design tool is available to you
 
 ## Instructions
-1. **Check the wallet first.** Call `GET /v1/wallet`. The wallet starts at ₦0 on purpose — funding it is the first act of any demo or real day.
+1. **Check the wallet first.** Call `GET /v1/wallet`. The wallet starts at ₦0 on purpose — funding it is the first act of any demo or real day. The wallet is *petty cash* — a separate pot from the Paystack bank balance; when someone asks about the **Paystack balance** specifically, answer with `check_paystack_balance`, never with the wallet figure (and vice versa).
 2. **If the balance is below what is needed, top up before anything else — use the bank transfer (push) path.** Read out the biller account from the wallet response (`account_number`, `bank` — the API is the single source of truth; never quote an account number from memory) and tell the owner to send the amount. When they confirm the transfer (or give you a reference), record it with `POST /v1/wallet/incoming` using that reference. The same reference can never be applied twice (409 `IDEMPOTENT_REPLAY`).
    - **Paystack pull is permitted but the test balance is empty.** The business is now a verified Registered Business (the old "starter" payouts block was lifted 2026-11-05), so the tool may return `insufficient_balance` instead — the account simply has no money in it. Report that plainly and fall back to the bank transfer path. Never fake a top-up.
 3. After funding, re-check the wallet and state the new balance in naira before continuing.
