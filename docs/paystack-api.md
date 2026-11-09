@@ -105,6 +105,12 @@ Recurring payments: customer + plan + start date; enable/disable with email toke
 | `POST /transfer/bulk` | Batch transfers (requires OTP disabled) |
 | `GET /transfer`, `GET /transfer/{id_or_code}`, `GET /transfer/verify/{reference}` | List/fetch/verify |
 
+**Recipient dedupe — read from docs 2026-11-09:** *"A duplicate account number will lead to the retrieval of the existing record."* In test mode only Paystack's test account resolves (`0000000000` @ `057`; anything else → `Cannot resolve account`), so **per-staff recipients collapse into one record** — three POSTs with the test account all return the same `RCP_…`. Distinct destinations per teammate are impossible in test mode; at go-live, one `POST /transferrecipient` per real staff account.
+
+**Subaccounts (`POST /subaccount`), read 2026-11-09:** splits *incoming* collections by percentage between main and sub account — wrong direction for payroll (which pays *out* from the main balance via transfers). Not needed.
+
+**Test balance top-up, confirmed 2026-11-09:** dashboard-only (Balance → Topup, min NGN 100) — no top-up endpoint exists in the API reference (`GET /balance`, `GET /balance/ledger` are read-only); the balance is also credited by every completed test transaction.
+
 ### Transfers Control — balance
 - `GET /balance` → `{ currency, balance }` in kobo — **Kemi's wallet check can be a real Paystack balance call**
 - `GET /balance/ledger` — all pay-ins/pay-outs with `difference` and `reason`
