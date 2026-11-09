@@ -22,3 +22,16 @@ vending-api/bin/
 ngrok-*.json
 vending-api/probe-order.out
 vending-api/server.log
+
+# Not part of the submission — support/working docs kept locally only
+# (the graded material lives in the submission note, not the repo)
+docs/
+plans/
+field-notes.md
+submission.md
+tsg-labs-build-exercise.md
+teammate-ideas.md
+chord-observations.md
+job-interview-email.md
+SKILL-template.md
+u.txt
