@@ -393,11 +393,14 @@ function registerSales(server: McpServer): void {
     'update_product',
     {
       description:
-        'Change a product in the Paystack catalogue (only when the owner asks — e.g. drop the price). ' +
+        'Change a product in the Paystack catalogue — price, name, description, or stock. ' +
+        'REQUIRES the owner code: show the owner what will change, ask for the code, and pass it — ' +
+        'the server verifies it and refuses without it (403 FORBIDDEN, catalogue unchanged). ' +
         'price_naira is in NAIRA (converted to kobo). The change is visible immediately on list_products and the hosted shop. ' +
-        'Errors: 404 NOT_FOUND, 422 VALIDATION_FAILED, 503 PAYSTACK_UNAVAILABLE.',
+        'Errors: 403 (bad/missing owner code), 404 NOT_FOUND, 422 VALIDATION_FAILED, 503 PAYSTACK_UNAVAILABLE.',
       inputSchema: {
         product_id: z.number().int().positive(),
+        owner_code: z.string().min(1).describe("The owner's secret phrase — ask for it, don't assume it"),
         price_naira: z.number().positive().optional().describe('New price in naira'),
         name: z.string().min(1).optional(),
         description: z.string().min(1).optional(),
@@ -407,12 +410,13 @@ function registerSales(server: McpServer): void {
     async (args: ToolArgs) => {
       const a = args as {
         product_id: number;
+        owner_code: string;
         price_naira?: number;
         name?: string;
         description?: string;
         quantity?: number;
       };
-      const patch: Record<string, unknown> = {};
+      const patch: Record<string, unknown> = { owner_code: a.owner_code };
       if (a.price_naira !== undefined) patch.price = kobo(a.price_naira);
       if (a.name !== undefined) patch.name = a.name;
       if (a.description !== undefined) patch.description = a.description;

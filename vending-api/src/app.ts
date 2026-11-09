@@ -722,6 +722,23 @@ app.put('/v1/products/:id', async (req, res) => {
       .json(errorEnvelope(422, 'VALIDATION_FAILED', 'product id must be a number'));
   }
   const body = req.body || {};
+
+  // Owner-code gate — catalogue mutations are customer-visible, money-affecting
+  // and persistent in Paystack: same tier as payroll. Server-side check; the
+  // agent's judgement is never taken at face value (mirrors POST /v1/salaries).
+  const expectedCode = process.env.OWNER_CODE || '';
+  const ownerCode = typeof body.owner_code === 'string' ? body.owner_code : '';
+  if (!expectedCode) {
+    return res
+      .status(503)
+      .json(errorEnvelope(503, 'FORBIDDEN', 'OWNER_CODE is not configured on this server'));
+  }
+  if (ownerCode !== expectedCode) {
+    return res
+      .status(403)
+      .json(errorEnvelope(403, 'FORBIDDEN', 'Owner code is not valid — catalogue unchanged'));
+  }
+
   const patch: Record<string, unknown> = {};
   if (body.price !== undefined) {
     const price = Number(body.price);

@@ -539,8 +539,25 @@ test('products list comes from the catalogue with prices, photos and shop url', 
   assert.equal(typeof json.data.storefront_url, 'string');
 });
 
+test('catalogue edits need the owner code: without it nothing changes (403)', async () => {
+  const noCode = await call('PUT', '/v1/products/2880907', { body: { price: 100 } });
+  assert.equal(noCode.http, 403);
+  assert.equal(noCode.json.data.error.code, 'FORBIDDEN');
+
+  const wrongCode = await call('PUT', '/v1/products/2880907', {
+    body: { price: 100, owner_code: 'letmein' }
+  });
+  assert.equal(wrongCode.http, 403);
+
+  const list = await call('GET', '/v1/products');
+  const mint = (list.json.data.products as any[]).find((p) => p.id === 2880907);
+  assert.equal(mint.price, 1150000, 'a refused edit leaves the catalogue untouched');
+});
+
 test('owner updates a price -> catalogue reflects it (agent edit path)', async () => {
-  const upd = await call('PUT', '/v1/products/2880907', { body: { price: 999900 } });
+  const upd = await call('PUT', '/v1/products/2880907', {
+    body: { price: 999900, owner_code: 'flowerpower' }
+  });
   assert.equal(upd.http, 200);
   assert.equal(upd.json.data.product.price, 999900);
 
@@ -548,9 +565,13 @@ test('owner updates a price -> catalogue reflects it (agent edit path)', async (
   const mint = (list.json.data.products as any[]).find((p) => p.id === 2880907);
   assert.equal(mint.price, 999900, 'the change must be readable afterwards');
 
-  const bad = await call('PUT', '/v1/products/2880907', { body: {} });
+  const bad = await call('PUT', '/v1/products/2880907', {
+    body: { owner_code: 'flowerpower' }
+  });
   assert.equal(bad.http, 422);
-  const missing = await call('PUT', '/v1/products/999', { body: { price: 100 } });
+  const missing = await call('PUT', '/v1/products/999', {
+    body: { price: 100, owner_code: 'flowerpower' }
+  });
   assert.equal(missing.http, 404);
 });
 

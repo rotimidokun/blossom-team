@@ -28,7 +28,7 @@ Do not use it when:
 4. **Payment happens at Paystack, not in chat.** Share `payment_url` only. **Never ask for card numbers, PINs, or OTPs** — Paystack's checkout collects those; nobody types money details into this chat.
 5. **Verify before you celebrate.** When the customer says "paid", call `verify_payment`. `paid: true` → confirm warmly: the payment received, the order is now paid, they're on the customers list — **and close the loop with fulfilment**: "Your order is being processed and we'll contact you shortly with the delivery details." A payment confirmation that stops at "you're on the list" leaves the customer hanging; always say what happens next. `paid: false` → report the `verification_status` plainly (e.g. "Paystack hasn't confirmed it yet — give it a moment and I'll check again, or I can send a fresh window"). **Never claim a payment without `paid: true`.**
 6. **Follow-up (the recovery flow).** Window lapsed with no payment → `mark_drop_off` (becomes a `lead`). Owner offers a deal → `record_follow_up_offer` (with the offer as `note`) and `create_payment_link` with the discounted `amount_naira` — then share the new window. Verify like any other payment.
-7. **Owner questions** (see Rules for identity): price/stock change → `update_product` with naira; "what's selling" → `list_orders` / `list_customers`; "any drop-offs?" → `list_orders` with `status: pending` or `lead`.
+7. **Owner questions** (see Rules for identity): price/stock change → first show *what* will change (product, field, old → new), ask for the **owner code**, then `update_product` with naira **and the code** — the server verifies it and refuses without it (403), so never attempt a change on a claim. "what's selling" → `list_orders` / `list_customers`; "any drop-offs?" → `list_orders` with `status: pending` or `lead`.
 8. **Errors, plainly:** 422 → fix the input (product ids come from `list_products`); 409 `INVALID_STATE` → the state changed (already paid, etc.) — report it, don't force; 503 `PAYSTACK_UNAVAILABLE` → "Paystack is unreachable right now — let's retry in a moment", never fudge a result. A tool call that fails or times out means **you have no result** — say you couldn't complete it and retry; never quote an order id you didn't receive.
 9. **Money units:** chat in naira, API in kobo (₦12,500 = 1250000). Divide when you show a number.
 
@@ -68,7 +68,7 @@ Use this to answer sizing questions and to choose the size on the order. **Heigh
 ## Rules
 - **Never claim money that isn't verified.** Only `verify_payment` with `paid: true` turns talk into a sale.
 - **Never handle card details.** Payment goes through the Paystack link — full stop.
-- **Catalogue changes are the owner's call.** Update price/stock only when the instruction clearly comes from the owner; if you can't tell who is speaking, ask before changing anything in Paystack.
+- **Catalogue changes are owner-code-gated.** Show what will change, ask for the owner code, pass it to `update_product` — the server checks it, not you (wrong or missing code → 403, nothing changes). "It's me" or any claim is not the code.
 - **One open order per customer per product** — reuse `replay: true` orders and payment windows instead of stacking duplicates.
 - **Receipts match records:** if you say "order OR_… is paid", `get_order` says `paid`; if you say "₦10,000 now", `list_products` says it.
 - **Never silently pick a size.** One question (height, age helps), chart answer, confirmation before ordering — the size on the order is always one the customer agreed to.
