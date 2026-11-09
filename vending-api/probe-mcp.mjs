@@ -55,7 +55,10 @@ const OPS = [
   'validate_phone',
   'buy_electricity',
   'buy_airtime',
-  'list_purchases'
+  'list_purchases',
+  'list_staff',
+  'pay_salaries',
+  'list_salaries'
 ];
 const DESIGN = ['generate_design', 'list_designs', 'list_garments'];
 const SALES = [

@@ -13,6 +13,8 @@ delete process.env.NODE_ENV;
 process.env.MAE_MOCK = '1';
 delete process.env.GEMINI_API_KEY;
 delete process.env.OPENROUTER_API_KEY;
+// Owner code gating the monthly payday run (route reads it per request).
+process.env.OWNER_CODE = 'flowerpower';
 
 // Dynamic import on purpose: the env assignments above must run first.
 const { startServer } = await import('../src/server.js');
@@ -494,12 +496,16 @@ test('MCP /mcp serves ONLY the ops bucket (no design tools)', async () => {
       'buy_electricity',
       'check_wallet',
       'list_purchases',
+      'list_salaries',
+      'list_staff',
+      'pay_salaries',
       'record_wallet_funding',
       'validate_meter',
       'validate_phone'
     ].sort()
   );
   assert.ok(!names.includes('generate_design'), 'Kemi must not get design tools');
+  assert.ok(!names.includes('list_products'), 'Kemi does not get Ada\'s catalogue tools');
 });
 
 test('MCP /mcp/design serves ONLY the design bucket (no money tools)', async () => {
@@ -666,4 +672,102 @@ test('MCP /mcp/sales serves ONLY the sales bucket (10 tools)', async () => {
   );
   assert.ok(!names.includes('check_wallet'), 'money tools are not hers');
   assert.ok(!names.includes('generate_design'), 'design tools are not hers');
+  assert.ok(!names.includes('pay_salaries'), 'payroll tools are not hers');
+});
+
+// --- staff & monthly payday (Kemi: owner-code gated payroll run) ---------------
+
+test('staff list is the three AI agents with made-up monthly salaries in kobo', async () => {
+  const { http, json } = await call('GET', '/v1/staff');
+  assert.equal(http, 200);
+  const staff = json.data.staff as any[];
+  assert.equal(staff.length, 3, 'the owner is deliberately NOT on payroll');
+  assert.deepEqual(staff.map((s) => s.name).sort(), ['Ada', 'Kemi', 'Mae'].sort());
+  for (const s of staff) {
+    assert.equal(s.agent, true);
+    assert.ok(Number.isInteger(s.salary) && s.salary > 0, 'salary is kobo');
+  }
+});
+
+test('payroll needs the owner code: wrong or missing code runs nothing (403)', async () => {
+  const wrong = await call('POST', '/v1/salaries', { body: { owner_code: 'letmein' } });
+  assert.equal(wrong.http, 403);
+  assert.equal(wrong.json.data.error.code, 'FORBIDDEN');
+
+  const missing = await call('POST', '/v1/salaries', { body: {} });
+  assert.equal(missing.http, 403);
+
+  const history = await call('GET', '/v1/salaries');
+  assert.equal((history.json.data.salaries as any[]).length, 0, 'no attempt may be recorded without the code');
+});
+
+test('monthly run pays everyone once: 3 paid, rerun skips them all', async () => {
+  const run = await call('POST', '/v1/salaries', {
+    body: { owner_code: 'flowerpower', month: '2026-11' }
+  });
+  assert.equal(run.http, 201);
+  assert.equal(run.json.data.paid, 3);
+  assert.equal(run.json.data.failed, 0);
+  assert.equal(run.json.data.skipped, 0);
+  assert.equal(run.json.data.total_paid_kobo, 25000000 + 22000000 + 20000000);
+  for (const s of run.json.data.salaries as any[]) {
+    assert.equal(s.status, 'paid');
+    assert.ok(s.transfer_code, 'paid records carry a transfer code');
+    assert.match(s.transfer_reference, /^sal-stf_(kemi|mae|ada)-2026-11$/);
+  }
+
+  const again = await call('POST', '/v1/salaries', {
+    body: { owner_code: 'flowerpower', month: '2026-11' }
+  });
+  assert.equal(again.http, 201);
+  assert.equal(again.json.data.paid, 0, 'nobody is paid twice for a month');
+  assert.equal(again.json.data.skipped, 3);
+
+  const history = await call('GET', '/v1/salaries?month=2026-11');
+  assert.equal((history.json.data.salaries as any[]).length, 3, 'rerun adds no records');
+});
+
+test('salary failure path: transfer failure is recorded as failed, never a payslip', async () => {
+  process.env.MOCK_TRANSFER_FAIL = '1';
+  try {
+    const run = await call('POST', '/v1/salaries', {
+      body: { owner_code: 'flowerpower', month: '2026-12' }
+    });
+    assert.equal(run.http, 201, 'the attempt itself is still recorded');
+    assert.equal(run.json.data.paid, 0);
+    assert.equal(run.json.data.failed, 3);
+    for (const s of run.json.data.salaries as any[]) {
+      assert.equal(s.status, 'failed');
+      assert.match(s.failure_reason, /balance/i);
+      assert.equal(s.transfer_code, null, 'no transfer code on a failure');
+    }
+
+    // failed months stay retryable once the balance is topped up
+    delete process.env.MOCK_TRANSFER_FAIL;
+    const retry = await call('POST', '/v1/salaries', {
+      body: { owner_code: 'flowerpower', month: '2026-12' }
+    });
+    assert.equal(retry.json.data.paid, 3, 'a failed month can be retried');
+  } finally {
+    delete process.env.MOCK_TRANSFER_FAIL;
+  }
+});
+
+test('payroll validation: bad month and unknown staff are 422; one-person run works', async () => {
+  const badMonth = await call('POST', '/v1/salaries', {
+    body: { owner_code: 'flowerpower', month: 'november' }
+  });
+  assert.equal(badMonth.http, 422);
+
+  const badStaff = await call('POST', '/v1/salaries', {
+    body: { owner_code: 'flowerpower', month: '2026-10', staff_id: 'stf_nope' }
+  });
+  assert.equal(badStaff.http, 422);
+
+  const one = await call('POST', '/v1/salaries', {
+    body: { owner_code: 'flowerpower', month: '2026-10', staff_id: 'stf_mae' }
+  });
+  assert.equal(one.http, 201);
+  assert.equal(one.json.data.paid, 1, 'staff_id narrows the run to one person');
+  assert.equal((one.json.data.salaries as any[])[0].staff_name, 'Mae');
 });

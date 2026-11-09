@@ -132,6 +132,20 @@ export async function transfer({
   reference,
   reason
 }: TransferArgs): Promise<TransferResult> {
+  // No key (tests / local fixture): succeed in-process so the payday flow is
+  // testable without dialing out. Test hook: MOCK_TRANSFER_FAIL=1 simulates an
+  // empty balance so the failure path (recorded, never a fake payslip) is covered.
+  if (mockMode()) {
+    if (process.env.MOCK_TRANSFER_FAIL === '1') {
+      throw fail(
+        'Your balance is not enough to fulfil this request',
+        'PAYSTACK_ERROR',
+        { code: 'insufficient_balance' }
+      );
+    }
+    return { transfer_code: `TRF_mock_${reference}`, reference, status: 'success', amount: amountKobo };
+  }
+
   const recipient = process.env.PAYSTACK_RECIPIENT;
   if (!recipient) {
     throw fail(

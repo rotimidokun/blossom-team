@@ -152,6 +152,43 @@ export interface Customer {
   updated_at?: string;
 }
 
+// --- staff & salaries (Kemi: monthly payday for the AI team) ------------------
+
+/**
+ * A payroll member. The three AI teammates ARE the staff — the owner is not
+ * on payroll (owners draw, they don't take a salary). Made-up monthly salary
+ * in kobo (Paystack convention). `recipient_code` is the Paystack transfer
+ * recipient; the single test recipient is reused across the team until
+ * per-staff recipients are created (go-live task).
+ */
+export interface Staff {
+  id: string; // stf_kemi
+  name: string;
+  role: string;
+  salary: number; // kobo per month
+  agent: boolean; // one of the Chord teammates
+  recipient_code: string | null;
+}
+
+/**
+ * One salary attempt. `paid` only when Paystack's transfer succeeded —
+ * a failed transfer is recorded as `failed` with the reason, never as a
+ * payslip (skill rule: never claim money that isn't confirmed).
+ */
+export interface SalaryPayment {
+  id: string; // sal_xxxxxxxx
+  staff_id: string;
+  staff_name: string;
+  amount: number; // kobo
+  currency: 'NGN';
+  month: string; // YYYY-MM
+  status: 'paid' | 'failed';
+  transfer_reference: string | null;
+  transfer_code: string | null;
+  failure_reason: string | null;
+  created_at: string;
+}
+
 // --- database ---------------------------------------------------------------
 
 export interface Db {
@@ -165,6 +202,8 @@ export interface Db {
   designs: Design[];
   orders: Order[];
   customers: Customer[];
+  staff: Staff[];
+  salaries: SalaryPayment[];
   generation_count: number; // cost cap: images generated this session
 }
 

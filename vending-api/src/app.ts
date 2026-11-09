@@ -30,6 +30,7 @@ import {
   initializeTransaction,
   listProducts,
   storefrontUrl,
+  transfer,
   updateProduct,
   verifyTransaction
 } from './paystack.js';
@@ -45,7 +46,9 @@ import type {
   ErrorEnvelope,
   FundingSource,
   ImageGenError,
-  Order
+  Order,
+  SalaryPayment,
+  Staff
 } from './types.js';
 
 const API_KEY = process.env.VENDING_API_KEY || 'test_vending_key';
@@ -1048,6 +1051,156 @@ app.post('/v1/orders/:id/status', (req, res) => {
 app.get('/v1/customers', (_req, res) => {
   const db = loadDb();
   res.json(envelope(true, 'Customers retrieved', { customers: db.customers.map((c) => ({ ...c })) }));
+});
+
+// --- Staff & salaries (Kemi: one monthly payday run, owner-code gated) --------
+// The three AI teammates ARE the staff; the owner is not on payroll. The run
+// pays every staff member for a month in one call (one Paystack transfer each,
+// same day — how payroll actually works). The OWNER_CODE must match before any
+// money moves: the server checks the code, never the agent's judgement.
+// Every attempt is recorded — `paid` (transfer ok) or `failed` (exact reason);
+// a failed transfer is never dressed up as a payslip.
+
+/** YYYY-MM, e.g. 2026-11. */
+function isValidMonth(m: string): boolean {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(m);
+}
+
+app.get('/v1/staff', (_req, res) => {
+  const db = loadDb();
+  res.json(envelope(true, 'Staff retrieved', { staff: db.staff.map((s) => ({ ...s })) }));
+});
+
+app.get('/v1/salaries', (req, res) => {
+  const db = loadDb();
+  const staffId = req.query.staff_id;
+  const month = req.query.month;
+  let salaries: SalaryPayment[] = db.salaries;
+  if (staffId !== undefined) salaries = salaries.filter((s) => s.staff_id === String(staffId));
+  if (month !== undefined) salaries = salaries.filter((s) => s.month === String(month));
+  res.json(envelope(true, 'Salary history retrieved', { salaries: salaries.map((s) => ({ ...s })) }));
+});
+
+app.post('/v1/salaries', async (req, res) => {
+  const db = loadDb();
+  const body = req.body || {};
+  const month = body.month === undefined ? new Date().toISOString().slice(0, 7) : String(body.month);
+  const ownerCode = typeof body.owner_code === 'string' ? body.owner_code : '';
+  const expectedCode = process.env.OWNER_CODE || '';
+
+  // Identity gate — fail closed: no configured code means nobody can run payroll.
+  if (!expectedCode) {
+    return res
+      .status(503)
+      .json(errorEnvelope(503, 'FORBIDDEN', 'OWNER_CODE is not configured on this server'));
+  }
+  if (ownerCode !== expectedCode) {
+    return res
+      .status(403)
+      .json(errorEnvelope(403, 'FORBIDDEN', 'Owner code is not valid — payroll did not run'));
+  }
+  if (!isValidMonth(month)) {
+    return res
+      .status(422)
+      .json(errorEnvelope(422, 'VALIDATION_FAILED', 'month must be YYYY-MM (e.g. 2026-11)'));
+  }
+
+  // Target: one staff member, or everyone (the normal payday run).
+  let targets: Staff[] = db.staff;
+  if (body.staff_id !== undefined) {
+    const one = db.staff.find((s) => s.id === String(body.staff_id));
+    if (!one) {
+      const ids = db.staff.map((s) => s.id).join(', ');
+      return res
+        .status(422)
+        .json(errorEnvelope(422, 'VALIDATION_FAILED', `staff_id must be one of: ${ids}`));
+    }
+    targets = [one];
+  }
+  if (targets.length === 0) {
+    return res.status(422).json(errorEnvelope(422, 'VALIDATION_FAILED', 'No staff on the payroll'));
+  }
+
+  const results: SalaryPayment[] = [];
+  let skipped = 0;
+  for (const member of targets) {
+    const already = db.salaries.find(
+      (s) => s.staff_id === member.id && s.month === month && s.status === 'paid'
+    );
+    if (already) {
+      skipped += 1; // never pay the same month twice
+      continue;
+    }
+
+    // Unique reference per attempt — Paystack rejects duplicate references.
+    const attempts =
+      db.salaries.filter((s) => s.staff_id === member.id && s.month === month).length + 1;
+    const reference =
+      attempts > 1 ? `sal-${member.id}-${month}-${attempts}` : `sal-${member.id}-${month}`;
+
+    let record: SalaryPayment;
+    try {
+      const transferResult = await transfer({
+        amountKobo: member.salary,
+        reference,
+        reason: `${month} salary — ${member.name} (${member.role})`
+      });
+      record = {
+        id: `sal_${randomUUID().slice(0, 8)}`,
+        staff_id: member.id,
+        staff_name: member.name,
+        amount: member.salary,
+        currency: 'NGN',
+        month,
+        status: 'paid',
+        transfer_reference: transferResult.reference,
+        transfer_code: transferResult.transfer_code,
+        failure_reason: null,
+        created_at: new Date().toISOString()
+      };
+      console.log(`[salary] ${member.name} ${month} PAID ${member.salary / 100} NGN (${transferResult.transfer_code})`);
+    } catch (err) {
+      const reason = (err as Error).message || 'Transfer failed';
+      record = {
+        id: `sal_${randomUUID().slice(0, 8)}`,
+        staff_id: member.id,
+        staff_name: member.name,
+        amount: member.salary,
+        currency: 'NGN',
+        month,
+        status: 'failed',
+        transfer_reference: reference,
+        transfer_code: null,
+        failure_reason: reason,
+        created_at: new Date().toISOString()
+      };
+      console.error(`[salary] ${member.name} ${month} FAILED: ${reason}`);
+    }
+    db.salaries.push(record);
+    results.push(record);
+  }
+  saveDb(db);
+
+  const paid = results.filter((r) => r.status === 'paid').length;
+  const failed = results.filter((r) => r.status === 'failed').length;
+  const message =
+    results.length === 0
+      ? `${month} payroll already completed — nobody left to pay`
+      : failed === 0
+        ? `Payday run complete — ${paid} paid for ${month}`
+        : `Payday run recorded — ${paid} paid, ${failed} failed for ${month}`;
+  res.status(201).json(
+    envelope(true, message, {
+      month,
+      paid,
+      failed,
+      skipped,
+      total_paid_kobo: results
+        .filter((r) => r.status === 'paid')
+        .reduce((sum, r) => sum + r.amount, 0),
+      salaries: results.map((r) => ({ ...r }))
+    })
+  );
 });
 
 // --- MCP (Chord's tool surface) ---------------------------------------------

@@ -249,6 +249,66 @@ function registerOps(server: McpServer): void {
     async () => toToolResult(await api('GET', '/v1/purchases'))
   );
 
+  // --- Kemi: staff & monthly payday ------------------------------------------
+  server.registerTool(
+    'list_staff',
+    {
+      description:
+        'The payroll: who works at Blossom by TC (the AI teammates), with role and monthly salary (KOBO — divide by 100 for naira). ' +
+        'Read this FIRST to show the owner the payday summary before running it.',
+      inputSchema: {}
+    },
+    async () => toToolResult(await api('GET', '/v1/staff'))
+  );
+
+  server.registerTool(
+    'pay_salaries',
+    {
+      description:
+        "Run payroll for a month: one Paystack transfer per staff member, same run. ALWAYS show the owner the summary (who, amounts, total) " +
+        "and get the owner code FIRST — the server verifies owner_code and refuses without it (403). " +
+        "Returns each attempt: status 'paid' (transfer_code) or 'failed' (failure_reason — e.g. balance not enough; report it plainly, never fake a payslip). " +
+        "Staff already paid for the month are skipped (skipped count) — reruns are safe. Errors: 403 FORBIDDEN (bad owner code), 422 VALIDATION_FAILED (bad month/staff_id).",
+      inputSchema: {
+        owner_code: z.string().min(1).describe("The owner's secret phrase — ask for it, don't assume it"),
+        month: z.string().optional().describe('YYYY-MM, defaults to the current month'),
+        staff_id: z.string().optional().describe('Pay ONE staff member only; omit for the full monthly run')
+      }
+    },
+    async (args: ToolArgs) => {
+      const a = args as { owner_code: string; month?: string; staff_id?: string };
+      return toToolResult(
+        await api('POST', '/v1/salaries', {
+          owner_code: a.owner_code,
+          ...(a.month ? { month: a.month } : {}),
+          ...(a.staff_id ? { staff_id: a.staff_id } : {})
+        })
+      );
+    }
+  );
+
+  server.registerTool(
+    'list_salaries',
+    {
+      description:
+        'Salary history: each attempt with month, amount (kobo), status paid/failed, transfer reference/code or failure reason. ' +
+        'Filter by staff_id and/or month; no filter = everything (the payslip audit trail).',
+      inputSchema: {
+        staff_id: z.string().optional(),
+        month: z.string().optional().describe('YYYY-MM')
+      }
+    },
+    async (args: ToolArgs) => {
+      const a = args as { staff_id?: string; month?: string };
+      const query = [
+        a.staff_id ? `staff_id=${encodeURIComponent(a.staff_id)}` : '',
+        a.month ? `month=${encodeURIComponent(a.month)}` : ''
+      ]
+        .filter(Boolean)
+        .join('&');
+      return toToolResult(await api('GET', `/v1/salaries${query ? `?${query}` : ''}`));
+    }
+  );
 }
 
 /** Design bucket — served at POST /mcp/design (assigned to Mae). */

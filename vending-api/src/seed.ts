@@ -56,6 +56,39 @@ export function buildSeed(): Db {
     designs: [], // Mae's approval queue: created -> pending -> approved/rejected
     orders: [], // Ada's sales pipeline: pending -> offer_sent -> paid / lead
     customers: [], // created when a payment verifies
+    // The payroll: the three AI teammates ARE the staff (the owner is not on
+    // payroll — owners draw, they don't take a salary; the demo flow is one
+    // monthly batch run). Salaries are made-up monthly amounts in kobo. All
+    // three point at the one test recipient (PAYSTACK_RECIPIENT) — per-staff
+    // recipients are a go-live task; the transfer `reason` names the staff
+    // member so the Paystack dashboard reads correctly.
+    staff: [
+      {
+        id: 'stf_kemi',
+        name: 'Kemi',
+        role: 'HR / Admin / Operations',
+        salary: 25000000, // NGN 250,000 / month
+        agent: true,
+        recipient_code: 'RCP_yab85z5ct7r24wg'
+      },
+      {
+        id: 'stf_mae',
+        name: 'Mae',
+        role: 'Brands / Media',
+        salary: 22000000, // NGN 220,000 / month
+        agent: true,
+        recipient_code: 'RCP_yab85z5ct7r24wg'
+      },
+      {
+        id: 'stf_ada',
+        name: 'Ada',
+        role: 'Business Development / Sales',
+        salary: 20000000, // NGN 200,000 / month
+        agent: true,
+        recipient_code: 'RCP_yab85z5ct7r24wg'
+      }
+    ],
+    salaries: [], // salary attempts: paid (transfer ok) or failed (reason)
     generation_count: 0 // cost cap: how many images generated this session
   };
 }

@@ -33,6 +33,8 @@ function normalize(loaded: Partial<Db>): Db {
   db.designs = loaded.designs ?? seed.designs;
   db.orders = loaded.orders ?? seed.orders;
   db.customers = loaded.customers ?? seed.customers;
+  db.staff = loaded.staff ?? seed.staff;
+  db.salaries = loaded.salaries ?? seed.salaries;
   db.generation_count = loaded.generation_count ?? seed.generation_count;
   return db;
 }
@@ -44,7 +46,7 @@ export function loadDb(): Db {
       const parsed = JSON.parse(readFileSync(DB_PATH, 'utf8')) as Partial<Db>;
       const db = normalize(parsed);
       // Backfill a stale file once so the fix is visible on disk too.
-      if (!('orders' in parsed) || !('customers' in parsed)) persist(db);
+      if (!('orders' in parsed) || !('customers' in parsed) || !('staff' in parsed)) persist(db);
       return db;
     } catch {
       // Corrupt file: fall through to a fresh seed rather than crash.
