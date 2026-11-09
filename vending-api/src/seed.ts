@@ -56,35 +56,19 @@ export function buildSeed(): Db {
     designs: [], // Mae's approval queue: created -> pending -> approved/rejected
     orders: [], // Ada's sales pipeline: pending -> offer_sent -> paid / lead
     customers: [], // created when a payment verifies
-    // The payroll: the three AI teammates ARE the staff (the owner is not on
-    // payroll — owners draw, they don't take a salary; the demo flow is one
-    // monthly batch run). Salaries are made-up monthly amounts in kobo. All
-    // three point at the one test recipient (PAYSTACK_RECIPIENT) — per-staff
-    // recipients are a go-live task; the transfer `reason` names the staff
-    // member so the Paystack dashboard reads correctly.
+    // The payroll: the FOUNDER's monthly draw only — a real founder paying
+    // themselves through the company account (standard practice; the owner
+    // code gates it). The AI teammates are deliberately NOT on payroll: they
+    // can't spend money, so "salary for the agents" stays a fun idea in the
+    // notes rather than a demo nobody can defend ("what will they use it for?").
+    // One recipient destination; made-up amount in kobo.
     staff: [
       {
-        id: 'stf_kemi',
-        name: 'Kemi',
-        role: 'HR / Admin / Operations',
-        salary: 25000000, // NGN 250,000 / month
-        agent: true,
-        recipient_code: 'RCP_yab85z5ct7r24wg'
-      },
-      {
-        id: 'stf_mae',
-        name: 'Mae',
-        role: 'Brands / Media',
-        salary: 22000000, // NGN 220,000 / month
-        agent: true,
-        recipient_code: 'RCP_yab85z5ct7r24wg'
-      },
-      {
-        id: 'stf_ada',
-        name: 'Ada',
-        role: 'Business Development / Sales',
-        salary: 20000000, // NGN 200,000 / month
-        agent: true,
+        id: 'stf_founder',
+        name: 'Tosin',
+        role: 'Founder / CEO',
+        salary: 10000000, // NGN 100,000 / month draw (fits the test balance today)
+        agent: false,
         recipient_code: 'RCP_yab85z5ct7r24wg'
       }
     ],

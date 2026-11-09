@@ -8,6 +8,13 @@ From reviewing the Ada (Tolu) and Kemi dress chats. Decisions confirmed with Tos
    remaining: audit `data/db.json` for any other half-created orders from the crash
    window, and confirm Ada only ever quotes IDs returned by `create_order`
    (replay-safe duplicate now guarantees this).
+6. **Payroll pivot (2026-11-09)** — payroll = **the founder's draw only** (₦100,000,
+   owner-code gated). The AI agents are NOT on payroll: a friend's challenge exposed
+   the weak spot ("what will they use the money for?" — nothing; agents can't spend).
+   The fun "salary for the agents" idea is **recorded here and in the skill** as a
+   deliberate scoping decision, not an oversight. Bonus: one destination fits the
+   test-mode recipient dedupe limit, and ₦100,000 fits today's ₦116,000 test balance —
+   green payday with a real Paystack transfer, no top-up needed.
 2. **Owner vs customer separation** — owner-only actions (price changes) happen in
    Kemi's direct line; Ada's chat link is customers only. Zero code; note in the
    go-live note. Passphrase option noted as the go-live answer.

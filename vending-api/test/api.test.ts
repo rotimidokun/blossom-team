@@ -698,16 +698,14 @@ test('MCP /mcp/sales serves ONLY the sales bucket (10 tools)', async () => {
 
 // --- staff & monthly payday (Kemi: owner-code gated payroll run) ---------------
 
-test('staff list is the three AI agents with made-up monthly salaries in kobo', async () => {
+test('staff list is the founder only — the AI agents are deliberately NOT paid', async () => {
   const { http, json } = await call('GET', '/v1/staff');
   assert.equal(http, 200);
   const staff = json.data.staff as any[];
-  assert.equal(staff.length, 3, 'the owner is deliberately NOT on payroll');
-  assert.deepEqual(staff.map((s) => s.name).sort(), ['Ada', 'Kemi', 'Mae'].sort());
-  for (const s of staff) {
-    assert.equal(s.agent, true);
-    assert.ok(Number.isInteger(s.salary) && s.salary > 0, 'salary is kobo');
-  }
+  assert.equal(staff.length, 1, 'payroll = the founder draw alone');
+  assert.equal(staff[0].name, 'Tosin');
+  assert.equal(staff[0].agent, false, 'agents cannot spend money — they are not staff');
+  assert.ok(Number.isInteger(staff[0].salary) && staff[0].salary > 0, 'salary is kobo');
 });
 
 test('payroll needs the owner code: wrong or missing code runs nothing (403)', async () => {
@@ -722,30 +720,30 @@ test('payroll needs the owner code: wrong or missing code runs nothing (403)', a
   assert.equal((history.json.data.salaries as any[]).length, 0, 'no attempt may be recorded without the code');
 });
 
-test('monthly run pays everyone once: 3 paid, rerun skips them all', async () => {
+test('monthly run pays the founder once: 1 paid, rerun skips it', async () => {
   const run = await call('POST', '/v1/salaries', {
     body: { owner_code: 'flowerpower', month: '2026-11' }
   });
   assert.equal(run.http, 201);
-  assert.equal(run.json.data.paid, 3);
+  assert.equal(run.json.data.paid, 1);
   assert.equal(run.json.data.failed, 0);
   assert.equal(run.json.data.skipped, 0);
-  assert.equal(run.json.data.total_paid_kobo, 25000000 + 22000000 + 20000000);
-  for (const s of run.json.data.salaries as any[]) {
-    assert.equal(s.status, 'paid');
-    assert.ok(s.transfer_code, 'paid records carry a transfer code');
-    assert.match(s.transfer_reference, /^sal-stf_(kemi|mae|ada)-2026-11$/);
-  }
+  assert.equal(run.json.data.total_paid_kobo, 10000000); // NGN 100,000
+  const record = (run.json.data.salaries as any[])[0];
+  assert.equal(record.status, 'paid');
+  assert.equal(record.staff_name, 'Tosin');
+  assert.ok(record.transfer_code, 'paid records carry a transfer code');
+  assert.match(record.transfer_reference, /^sal-stf_founder-2026-11$/);
 
   const again = await call('POST', '/v1/salaries', {
     body: { owner_code: 'flowerpower', month: '2026-11' }
   });
   assert.equal(again.http, 201);
-  assert.equal(again.json.data.paid, 0, 'nobody is paid twice for a month');
-  assert.equal(again.json.data.skipped, 3);
+  assert.equal(again.json.data.paid, 0, 'the same month is never paid twice');
+  assert.equal(again.json.data.skipped, 1);
 
   const history = await call('GET', '/v1/salaries?month=2026-11');
-  assert.equal((history.json.data.salaries as any[]).length, 3, 'rerun adds no records');
+  assert.equal((history.json.data.salaries as any[]).length, 1, 'rerun adds no records');
 });
 
 test('salary failure path: transfer failure is recorded as failed, never a payslip', async () => {
@@ -756,7 +754,7 @@ test('salary failure path: transfer failure is recorded as failed, never a paysl
     });
     assert.equal(run.http, 201, 'the attempt itself is still recorded');
     assert.equal(run.json.data.paid, 0);
-    assert.equal(run.json.data.failed, 3);
+    assert.equal(run.json.data.failed, 1);
     for (const s of run.json.data.salaries as any[]) {
       assert.equal(s.status, 'failed');
       assert.match(s.failure_reason, /balance/i);
@@ -768,7 +766,7 @@ test('salary failure path: transfer failure is recorded as failed, never a paysl
     const retry = await call('POST', '/v1/salaries', {
       body: { owner_code: 'flowerpower', month: '2026-12' }
     });
-    assert.equal(retry.json.data.paid, 3, 'a failed month can be retried');
+    assert.equal(retry.json.data.paid, 1, 'a failed month can be retried');
   } finally {
     delete process.env.MOCK_TRANSFER_FAIL;
   }
@@ -786,9 +784,9 @@ test('payroll validation: bad month and unknown staff are 422; one-person run wo
   assert.equal(badStaff.http, 422);
 
   const one = await call('POST', '/v1/salaries', {
-    body: { owner_code: 'flowerpower', month: '2026-10', staff_id: 'stf_mae' }
+    body: { owner_code: 'flowerpower', month: '2026-10', staff_id: 'stf_founder' }
   });
   assert.equal(one.http, 201);
   assert.equal(one.json.data.paid, 1, 'staff_id narrows the run to one person');
-  assert.equal((one.json.data.salaries as any[])[0].staff_name, 'Mae');
+  assert.equal((one.json.data.salaries as any[])[0].staff_name, 'Tosin');
 });

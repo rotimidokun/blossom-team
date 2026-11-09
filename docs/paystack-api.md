@@ -105,7 +105,9 @@ Recurring payments: customer + plan + start date; enable/disable with email toke
 | `POST /transfer/bulk` | Batch transfers (requires OTP disabled) |
 | `GET /transfer`, `GET /transfer/{id_or_code}`, `GET /transfer/verify/{reference}` | List/fetch/verify |
 
-**Recipient dedupe — read from docs 2026-11-09:** *"A duplicate account number will lead to the retrieval of the existing record."* In test mode only Paystack's test account resolves (`0000000000` @ `057`; anything else → `Cannot resolve account`), so **per-staff recipients collapse into one record** — three POSTs with the test account all return the same `RCP_…`. Distinct destinations per teammate are impossible in test mode; at go-live, one `POST /transferrecipient` per real staff account.
+**Recipient dedupe — read from docs 2026-11-09:** *"A duplicate account number will lead to the retrieval of the existing record."* Same bank+account submitted again returns the EXISTING recipient instead of creating a new one. Test mode offers **two** transfer-capable accounts (Test Payments → Bank accounts: **Zenith `0000000000` @ `057`**, **Kuda `8100000000` @ `50211`**; anything else → `Cannot resolve account`) — two distinct destinations but three would need three. **Post-pivot (2026-11-09): payroll = the founder's draw only — one destination, so the dedupe limit is moot in practice**; per-teammate recipients stay a go-live line (one `POST /transferrecipient` per real staff account; the Test Payments page also notes a regular merchant account works in test mode — avoided here under the no-real-personal-numbers rule).
+
+**Bulk payroll — `POST /transfer/bulk`:** one call, array of transfers (the natural go-live payday primitive); **requires OTP disabled** — a security trade-off to weigh at go-live (convenience vs transfer OTP). Still needs recipients, so it inherits the dedupe rule above.
 
 **Subaccounts (`POST /subaccount`), read 2026-11-09:** splits *incoming* collections by percentage between main and sub account — wrong direction for payroll (which pays *out* from the main balance via transfers). Not needed.
 
