@@ -207,6 +207,75 @@ app.post('/v1/validate/meter', (req, res) => {
   );
 });
 
+// --- phone resolution ---------------------------------------------------------
+// Research 2026-11-09 (NCC numbering plan / Wikipedia / carrier references):
+// Nigerian mobiles are 11 digits — leading 0 + a 3- or 4-digit network prefix.
+// Two rules of realism shape this code:
+//   1. NOTHING is stored. Ground rules forbid real personal numbers, and a
+//      whitelist would reject every tester's real line (the bug Victor hit).
+//      Validity = format; network = prefix lookup; both computed per call.
+//   2. Mobile Number Portability: a prefix is a HINT, not proof of the current
+//      network. Seed fixtures are exact truth (strict); for unknown numbers the
+//      buyer's stated network wins over prefix detection.
+// The seed's 0809 line reading AIRTEL is legitimate under MNP (ported).
+const NETWORK_PREFIXES: [string, string][] = (
+  [
+    // MTN (5-digit sub-prefixes first via longest-match sorting)
+    ['07025', 'MTN'], ['07026', 'MTN'],
+    ['0803', 'MTN'], ['0806', 'MTN'], ['0703', 'MTN'], ['0706', 'MTN'], ['0704', 'MTN'],
+    ['0810', 'MTN'], ['0813', 'MTN'], ['0814', 'MTN'], ['0816', 'MTN'],
+    ['0903', 'MTN'], ['0906', 'MTN'], ['0913', 'MTN'], ['0916', 'MTN'],
+    // Glo
+    ['0805', 'GLO'], ['0807', 'GLO'], ['0705', 'GLO'], ['0811', 'GLO'],
+    ['0815', 'GLO'], ['0905', 'GLO'], ['0915', 'GLO'],
+    // Airtel
+    ['0802', 'AIRTEL'], ['0808', 'AIRTEL'], ['0701', 'AIRTEL'], ['0708', 'AIRTEL'],
+    ['0812', 'AIRTEL'], ['0901', 'AIRTEL'], ['0902', 'AIRTEL'], ['0904', 'AIRTEL'],
+    ['0907', 'AIRTEL'], ['0911', 'AIRTEL'], ['0912', 'AIRTEL'],
+    // 9mobile
+    ['0809', '9MOBILE'], ['0817', '9MOBILE'], ['0818', '9MOBILE'],
+    ['0908', '9MOBILE'], ['0909', '9MOBILE']
+  ] as [string, string][]
+).sort((a, b) => b[0].length - a[0].length); // longest prefix first (07025 beats 0702/0703...)
+
+/** Accept 0XXXXXXXXXX, +234XXXXXXXXXX, 234XXXXXXXXXX, and formatted input;
+ *  everything becomes the canonical 11-digit 0-form. Nothing is persisted. */
+function normalizePhone(raw: string): string {
+  let s = String(raw).replace(/[\s\-().]/g, '');
+  if (s.startsWith('+234')) s = `0${s.slice(4)}`;
+  else if (s.startsWith('234') && s.length === 13) s = `0${s.slice(3)}`;
+  return s;
+}
+
+function detectNetwork(normalized: string): string | null {
+  for (const [prefix, network] of NETWORK_PREFIXES) {
+    if (normalized.startsWith(prefix)) return network;
+  }
+  return null;
+}
+
+interface ResolvedPhone {
+  phone_number: string;
+  network: string | null;
+  valid: boolean;
+  /** true = came from the seeded fixtures (exact truth, strict cross-check). */
+  from_fixture: boolean;
+}
+
+/** Fixture first (incl. the deliberately-invalid demo line), then format+prefix. */
+function resolvePhone(db: Db, raw: string): ResolvedPhone {
+  const normalized = normalizePhone(raw);
+  const fixture = db.phones.find((p) => p.phone_number === normalized);
+  if (fixture) {
+    return { phone_number: fixture.phone_number, network: fixture.network, valid: fixture.valid, from_fixture: true };
+  }
+  // 11 digits total: leading 0, then 7/8/9, then 9 more (a 10-digit tail).
+  if (!/^0[789]\d{9}$/.test(normalized)) {
+    return { phone_number: normalized, network: null, valid: false, from_fixture: false };
+  }
+  return { phone_number: normalized, network: detectNetwork(normalized), valid: true, from_fixture: false };
+}
+
 app.post('/v1/validate/phone', (req, res) => {
   const db = loadDb();
   const { phone_number } = req.body || {};
@@ -217,8 +286,8 @@ app.post('/v1/validate/phone', (req, res) => {
       .json(errorEnvelope(422, 'VALIDATION_FAILED', 'phone_number is required'));
   }
 
-  const entry = db.phones.find((p) => p.phone_number === String(phone_number));
-  if (!entry || !entry.valid) {
+  const resolved = resolvePhone(db, String(phone_number));
+  if (!resolved.valid) {
     return res
       .status(400)
       .json(errorEnvelope(400, 'INVALID_PHONE', 'Phone number is not a valid Nigerian line'));
@@ -227,8 +296,8 @@ app.post('/v1/validate/phone', (req, res) => {
   res.json(
     envelope(true, 'Phone validated', {
       valid: true,
-      phone_number: entry.phone_number,
-      network: entry.network
+      phone_number: resolved.phone_number,
+      network: resolved.network
     })
   );
 });
@@ -336,19 +405,23 @@ app.post('/v1/purchases/airtime', (req, res) => {
   }
   if (replayIfDuplicate(db, res, idempotencyKey)) return;
 
-  const entry = db.phones.find((p) => p.phone_number === String(phone_number));
-  if (!entry || !entry.valid) {
+  const resolved = resolvePhone(db, String(phone_number));
+  if (!resolved.valid) {
     return res
       .status(400)
       .json(errorEnvelope(400, 'INVALID_PHONE', 'Phone number is not a valid Nigerian line'));
   }
-  if (network && network !== entry.network) {
+  // Strict cross-check only for fixture numbers (we KNOW their network). For
+  // prefix-detected numbers MNP means the prefix can lag reality — the buyer's
+  // stated network wins rather than hard-failing a legitimately ported line.
+  if (network && resolved.from_fixture && resolved.network && network !== resolved.network) {
     return res
       .status(400)
       .json(
-        errorEnvelope(400, 'VALIDATION_FAILED', `Phone belongs to ${entry.network}, not ${network}`)
+        errorEnvelope(400, 'VALIDATION_FAILED', `Phone belongs to ${resolved.network}, not ${network}`)
       );
   }
+  const finalNetwork = network || resolved.network || 'Unknown';
   if (walletTooSmall(res, db, amount)) return;
 
   db.wallet.balance -= amount;
@@ -358,10 +431,9 @@ app.post('/v1/purchases/airtime', (req, res) => {
     status: 'success',
     amount,
     currency: 'NGN',
-    phone_number: entry.phone_number,
-    // Valid seeded lines always carry a network; the cast keeps the response
-    // shape identical to the JS version.
-    network: entry.network as string,
+    phone_number: resolved.phone_number,
+    // Buyer-stated network when given (MNP), else prefix detection, else Unknown.
+    network: finalNetwork,
     reference: newReference(),
     wallet_balance_after: db.wallet.balance,
     created_at: new Date().toISOString()

@@ -165,6 +165,39 @@ test('invalid phone is 400 INVALID_PHONE', async () => {
   assert.equal(json.data.error.code, 'INVALID_PHONE');
 });
 
+test('any well-formed Nigerian number validates — nothing stored, +234 normalized', async () => {
+  // Victor's real-number failure (2026-11-09): the exact-match directory rejected
+  // every tester's line. Now: format + prefix lookup, computed per call.
+  const real = await call('POST', '/v1/validate/phone', {
+    body: { phone_number: '08169566146' }
+  });
+  assert.equal(real.http, 200);
+  assert.equal(real.json.data.valid, true);
+  assert.equal(real.json.data.network, 'MTN', '0816 prefix');
+  assert.equal(real.json.data.phone_number, '08169566146');
+
+  const plus = await call('POST', '/v1/validate/phone', {
+    body: { phone_number: '+2348169566146' }
+  });
+  assert.equal(plus.http, 200);
+  assert.equal(plus.json.data.phone_number, '08169566146', '+234 normalizes to 0-form');
+  assert.equal(plus.json.data.network, 'MTN');
+
+  const dashed = await call('POST', '/v1/validate/phone', {
+    body: { phone_number: '0816-956-6146' }
+  });
+  assert.equal(dashed.json.data.valid, true, 'formatting is stripped');
+
+  const garbage = await call('POST', '/v1/validate/phone', { body: { phone_number: '12345' } });
+  assert.equal(garbage.http, 400, 'genuinely malformed still fails — the failure demo stays');
+
+  const unknownPrefix = await call('POST', '/v1/validate/phone', {
+    body: { phone_number: '08001234567' }
+  });
+  assert.equal(unknownPrefix.http, 200, 'format-valid even with an unknown prefix');
+  assert.equal(unknownPrefix.json.data.network, null, 'no network guessed when the prefix is unknown');
+});
+
 // --- purchases (wallet now funded) -----------------------------------------
 
 test('electricity purchase succeeds, debits wallet, returns token', async () => {
@@ -228,6 +261,24 @@ test('airtime with wrong network is 400', async () => {
   });
   assert.equal(http, 400);
   assert.equal(json.data.error.code, 'VALIDATION_FAILED');
+});
+
+test('airtime buys any valid format; prefix network is only a hint (MNP — buyer wins)', async () => {
+  // Unknown number + stated network: no fixture truth to contradict → accepted,
+  // and the buyer's network is what gets recorded (ported lines are legitimate).
+  const buy = await call('POST', '/v1/purchases/airtime', {
+    body: { phone_number: '+2348169566146', amount: 100000, network: 'MTN' }
+  });
+  assert.equal(buy.http, 200);
+  assert.equal(buy.json.data.network, 'MTN');
+  assert.equal(buy.json.data.phone_number, '08169566146', 'stored in canonical 0-form');
+
+  // Fixture numbers keep the strict cross-check (covered by the 400 above).
+  const noNetwork = await call('POST', '/v1/purchases/airtime', {
+    body: { phone_number: '09091234567', amount: 50000 }
+  });
+  assert.equal(noNetwork.http, 200, 'prefix-only line needs no stated network');
+  assert.equal(noNetwork.json.data.network, '9MOBILE', 'detected from the 0909 prefix');
 });
 
 // --- receipt lookup --------------------------------------------------------
