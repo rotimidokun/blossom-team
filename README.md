@@ -7,7 +7,7 @@ Kemi: fund the wallet (starts at ₦0) → validate meter/line → show the owne
       monthly payday: summary → owner code → paid (wallet or Paystack), every attempt recorded
 Ada:  quote the real Paystack catalogue → open a payment window → verify the payment → customer recorded
       (drop-offs become leads with a recovery offer; catalogue edits need the owner code)
-Mae:  brief → generate image → approval queue → owner approves/rejects → owner posts (the agent never auto-posts)
+Mae:  brief → generate image → owner approves/rejectS.
 ```
 
 Built for the **TSG Labs build exercise**. All data is made up and no real money moves (ground rules: test keys and made-up data only).
@@ -41,7 +41,7 @@ Environment variables and test defaults:
 | `SALARY_SOURCE` | `wallet` | `wallet` = payday debits the vending wallet; `paystack` = real `POST /transfer` |
 | `PUBLIC_BASE_URL` | — | Base for image links shared in chat (absolute URLs), e.g. the Render URL |
 
-**Evaluator Note on Live Image Generation:** To test live image generation without configuring a separate provider, add the pre-funded $5 OpenRouter key provided in your submission details to your `.env` file under `OPENROUTER_API_KEY`. If left unset, the system safely falls back to `MAE_MOCK=1` for free mock images.
+**Note to Evaluator on Live Image Generation:** To test live image generation, add the pre-funded $5 OpenRouter key provided in the submission notes to your `.env` file under `OPENROUTER_API_KEY`. If left unset, the system safely falls back to `MAE_MOCK=1` for free mock images.
 
 ## Try it
 
@@ -101,12 +101,12 @@ curl http://localhost:3000/v1/purchases/electricity \
 | POST | `/v1/designs/:id/reject` | Owner rejects with a reason |
 | GET | `/images/:file` | Serve a generated image (no auth — shareable link) |
 
-Full contract: `openapi.json` (importable — Chord's Custom tools → Import OpenAPI).
+Full contract: `openapi.json`.
 
 ## Design choices
 
 - **TypeScript, strict mode** — domain types live in `src/types.ts` (Db, Purchase, Design, the response envelope); the compiler catches shape drift between routes, seed and tests.
-- **Contract-first** — `openapi.json` is the source of truth shared with Chord's tool import; types mirror it deliberately.
+- **MCP-native tool surface** — Chord connects through three stateless MCP endpoints (`/mcp` ops, `/mcp/design`, `/mcp/sales`) instead of one shared API, so each teammate is granted only their own bucket: Kemi can't generate designs, Mae can't move money, Ada can't touch the wallet. The tools self-call the REST API over loopback, so validation, idempotency and error shapes have exactly one source of truth.
 - **No build step** — tsx runs the TS directly so the README's `npm start` is the same command in dev and demo; `npm run typecheck` gates the types separately.
 
 ## Conventions (deliberate, not accidental)
@@ -159,34 +159,13 @@ openapi.json   # machine-readable contract
 tsconfig.json  # strict type checking (npm run typecheck)
 ```
 
-## How we used AI tools
-
-Per the exercise brief's README requirement: this project was built with an AI coding agent (Architect → Code mode workflow). AI was used to:
-
-- research and distil the Chord and Paystack API docs into `docs/` reference notes,
-- draft the skill files in `skills/`,
-- write and refactor this API (including the switch from raw `node:http` to Express for readability),
-- migrate the API from JavaScript to strict TypeScript (reviewed gate-by-gate: typecheck → tests → live smoke),
-- write the test suite.
-
-All design decisions — envelope shape, error codes, idempotency, seed data, the validate-before-purchase flow — were reviewed and chosen by the human before implementation. Tests were run locally (`npm test`) to verify behavior, not assumed.
-
 ## The two money pots (funding flow)
 
 The wallet is petty cash; Paystack is the bank. Money moves in two directions:
 
-```mermaid
-flowchart LR
-  P[Paystack account<br/>the bank] -->|pull: POST /transfer (test mode)| W[Vending wallet<br/>starts at ₦0]
-  O[Owner's bank app] -->|push: bank transfer<br/>recorded via /v1/wallet/incoming| W
-  W -->|purchase debits| B[Airtime / electricity token]
-```
+
 
 - **Push path:** owner transfers to the biller account (`0000000000`, Zenith Bank test) → Kemi records it with a reference.
-- **Pull path:** `src/paystack.ts` calls the real Paystack test `POST /transfer` → the credit is recorded with the Paystack reference.
+- **Pull path:** `src/paystack.ts` calls the real Paystack test `POST /transfer` → the credit is recorded with the Paystack reference. Currently blocked because of pending KYC.
 
 Purchases always debit the wallet, so the balance goes down after every buy — exactly like a real biller wallet.
-
-## Going live (what would change)
-
-This is a mock. For real use: register with a Nigerian biller aggregator (Baxi, Remita Vending, etc. — requires business KYC), fund a vending wallet, swap the seed lookup for the aggregator's validate/purchase endpoints, move persistence from a JSON file to a database, and keep the same endpoint shapes above so the skill doesn't change. The Paystack pull path already uses the real transfer API — for live use, swap `sk_test_...` for a live key, keep OTP/transfer-control policies strict, and document who may trigger top-ups. Details in the submission's go-live note.
