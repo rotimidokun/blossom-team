@@ -1,27 +1,10 @@
 /**
- * Image-generation client for Mae — provider-agnostic with fallback chain.
- *
- * One entry point, three tiers (cheapest first):
- *   1. mock       — no key / MAE_MOCK=1: placeholder PNG, free, used by tests
- *   2. openrouter — OpenRouter key (OPENROUTER_API_KEY), paid credit, via the
- *                   dedicated POST /api/v1/images endpoint (b64_json response)
- *   3. gemini     — Google AI Studio key (GEMINI_API_KEY), disabled for now
- *                   (prepay credits depleted); re-enable by setting the key
- *
- * kind -> model routing lives here (MODEL_BY_KIND), so a flyer can go to a
- * text-capable image model while a model-shot goes to a photoreal one.
- * The chosen provider + model are returned so the design record shows
- * exactly which model produced the image.
- *
- * Env:
- *   GEMINI_API_KEY      Google AI Studio key (optional, currently unset)
- *   GEMINI_MODEL        override the Gemini model name
- *   OPENROUTER_API_KEY  OpenRouter key (optional)
- *   OPENROUTER_MODEL    override the OpenRouter model name
- *   MAE_MOCK            "1" forces mock mode even with keys set
- *
- * Error codes thrown (the skill branches on these):
- *   IMAGE_API_UNAVAILABLE / NO_IMAGE_PROVIDER
+ * Image generation for Mae — one entry point, cheapest tier first:
+ * mock (no key / MAE_MOCK=1, free, used by tests) → OpenRouter
+ * (OPENROUTER_API_KEY) → Gemini (GEMINI_API_KEY, currently disabled).
+ * kind→model routing lives in MODEL_BY_KIND; the chosen provider/model is
+ * returned onto the design record. Errors carry machine-readable codes
+ * (IMAGE_API_UNAVAILABLE / NO_IMAGE_PROVIDER) the skill branches on.
  */
 
 import { randomUUID } from 'node:crypto';

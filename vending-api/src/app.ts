@@ -1,20 +1,11 @@
 /**
- * Blossom by TC — mock vending API (Express).
+ * Blossom by TC API (Express) — one server, three teammates' tools:
+ * Kemi (wallet/validation/purchases/payroll), Mae (design approval queue),
+ * Ada (Paystack catalogue/orders/payments).
  *
- * One server, three teammates' tools:
- *   Kemi — wallet, validation, purchases (utility bills)
- *   Mae  — designs: generate -> link -> improve loop (no approval ceremony)
- *   Ada  — sales: Paystack catalogue, orders, payment windows, customers
- *
- * Conventions, deliberately mirroring the APIs we studied:
- *  - Response envelope { status, message, data }  (Paystack-style)
- *  - Bearer auth on every /v1 route                (Chord + Paystack style)
- *  - Amounts in kobo (NGN x100)                    (Paystack-style)
- *  - Idempotency-Key header on purchases           (safe retries, no double-buy)
- *  - Machine-readable error codes                  (what the skill branches on)
- *
- * Kemi's flow: validate -> show owner -> confirm -> purchase.
- * Mae's flow:  generate -> pending -> human approves/rejects -> human posts.
+ * Conventions mirror the APIs we studied: Paystack-style {status,message,data}
+ * envelope, bearer auth on /v1, amounts in kobo, Idempotency-Key on purchases,
+ * machine-readable error codes the skills branch on.
  */
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
@@ -81,8 +72,7 @@ const newReference = (): string => `blsm_${Date.now()}_${Math.floor(Math.random(
 // Where Mae's generated images live (served unauthenticated at /images/:file).
 const IMAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'images');
 const DESIGN_KINDS = ['model-shot', 'flyer', 'slide', 'social'] as const;
-// Cost cap: refuse to burn through credits in one session (override: MAE_MAX_GENERATIONS).
-// Read at request time so tests (and ops) can change it without a restart.
+// Cost cap — read at request time so tests/ops can change it without a restart.
 function maxGenerations(): number {
   return Number(process.env.MAE_MAX_GENERATIONS) || 10;
 }
@@ -92,12 +82,10 @@ function maxGenerations(): number {
 export const app = express();
 app.use(express.json());
 
-// Health check — no auth.
 app.get('/health', (_req, res) => {
   res.json(envelope(true, 'ok'));
 });
 
-// Bearer auth for everything below (Chord/Paystack pattern).
 app.use('/v1', (req: Request, res: Response, next: NextFunction) => {
   const auth = req.headers.authorization || '';
   if (auth !== `Bearer ${API_KEY}`) {
@@ -116,14 +104,9 @@ app.get('/v1/wallet', (req, res) => {
 });
 
 // --- wallet funding --------------------------------------------------------
-// Two ways in, both recorded against a reference so the same money
-// can never be counted twice:
-//   a) bank transfer (PUSH, the path that works today) -> owner sends to the
-//      biller account, we record detection via /v1/wallet/incoming
-//   b) Paystack pull (AVAILABLE since 2026-11-05 — Registered Business account
-//      lifted the starter payouts gate) -> src/paystack.ts moves money, we'd
-//      record it via /v1/wallet/paystack-funded. Test balance is currently
-//      ₦0, so push remains the demo path until test funds exist.
+// Two paths, both traced by reference so the same money can never count twice:
+//   a) push — owner transfers to the biller account -> /v1/wallet/incoming
+//   b) pull — Paystack test POST /transfer -> /v1/wallet/paystack-funded
 
 function fundWallet(
   db: Db,
@@ -208,16 +191,9 @@ app.post('/v1/validate/meter', (req, res) => {
 });
 
 // --- phone resolution ---------------------------------------------------------
-// Research 2026-11-09 (NCC numbering plan / Wikipedia / carrier references):
-// Nigerian mobiles are 11 digits — leading 0 + a 3- or 4-digit network prefix.
-// Two rules of realism shape this code:
-//   1. NOTHING is stored. Ground rules forbid real personal numbers, and a
-//      whitelist would reject every tester's real line (the bug Victor hit).
-//      Validity = format; network = prefix lookup; both computed per call.
-//   2. Mobile Number Portability: a prefix is a HINT, not proof of the current
-//      network. Seed fixtures are exact truth (strict); for unknown numbers the
-//      buyer's stated network wins over prefix detection.
-// The seed's 0809 line reading AIRTEL is legitimate under MNP (ported).
+// NOTHING is stored (ground rules: no real personal numbers) — validity and
+// network are computed per call. MNP: a prefix is only a hint, so for unknown
+// numbers the buyer's stated network wins; seed fixtures are exact truth.
 const NETWORK_PREFIXES: [string, string][] = (
   [
     // MTN (5-digit sub-prefixes first via longest-match sorting)
@@ -471,9 +447,8 @@ app.post('/v1/reset', (req, res) => {
   res.json(envelope(true, 'Database reset to seed state'));
 });
 
-// --- designs (Mae's approval queue) ----------------------------------------
-// Mae creates -> status pending -> owner approves/rejects -> owner posts.
-// The agent NEVER publishes; the queue is the real action the tool takes.
+// --- designs (Mae's approval queue) — the agent NEVER publishes; approve and
+// reject are the human's action.
 
 /** Serve a generated image by filename (no auth — it's a shareable link). */
 app.get('/images/:file', (req, res) => {
@@ -485,9 +460,7 @@ app.get('/images/:file', (req, res) => {
   res.sendFile(path);
 });
 
-// The garment store — the brand's real dresses, read from brand/dresses/.
-// Mae lists these first, the client picks one, and the photo is sent to the
-// image model as an input_reference so the design shows the actual dress.
+// The garment store — the brand's real dresses, used as image-model references.
 app.get('/v1/garments', (_req, res) => {
   const garments = listGarments();
   res.json(
@@ -513,10 +486,8 @@ app.get('/garments/:file', (req, res) => {
 
 // Generate an image -> save file -> queue as pending.
 /**
- * Absolute image URLs in API responses when PUBLIC_BASE_URL is set, so chat
- * replies contain a clickable link instead of a bare "/images/..." path.
- * The DB always stores the canonical relative path — only the response is
- * rewritten (unset in tests and local dev -> unchanged behaviour).
+ * Rewrite image_url to an absolute PUBLIC_BASE_URL link in responses only —
+ * the DB always keeps the canonical relative path.
  */
 function withPublicImageUrl<T extends { image_url: string }>(design: T): T {
   const base = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
@@ -597,11 +568,9 @@ app.post('/v1/designs/generate', async (req, res) => {
     );
   }
 
-  // Create the record FIRST and answer immediately. The 15-45s image call
-  // runs in the background so no HTTP/MCP connection stays open long enough
-  // for a flaky link to kill the turn — 2026-11-05: synchronous generation
-  // over the ngrok tunnel produced 502s, "unexpected EOF", and an aborted
-  // process while Mae waited. Now the caller polls for image_url instead.
+  // Record first, answer immediately; the 15-45s generation runs detached so
+  // no connection stays open long enough for a flaky link to kill the turn
+  // (2026-11-05: sync generation produced 502s and an aborted process).
   const id = `des_${randomUUID().slice(0, 8)}`;
   const design: Design = {
     id,
@@ -643,9 +612,8 @@ app.post('/v1/designs/generate', async (req, res) => {
       let ext = result.mimeType === 'image/jpeg' ? 'jpg' : 'png';
       let imageBuffer: Buffer = Buffer.from(result.imageBase64, 'base64');
 
-      // Stamp the REAL logo on top (guardrail #1) — the model is told never
-      // to draw it, so the only logo that ships is the actual file. Mock
-      // images skip this; a stamping failure never fails the generation.
+      // Stamp the real logo (the model is told never to draw it); mock skips
+      // this, and a stamping failure never fails the generation.
       if (!result.mock) {
         try {
           imageBuffer = await stampLogo(imageBuffer);
@@ -744,11 +712,9 @@ app.post('/v1/designs/:id/reject', (req, res) => {
   res.json(envelope(true, 'Design rejected', { ...withPublicImageUrl(design) }));
 });
 
-// --- Sales: catalogue (Paystack), orders, customers (Ada) ---------------------
-// Product truth (name/price/stock/photo) lives in PAYSTACK — external system,
-// agent-readable and agent-updatable. Orders/customers live here. Kobo in/out
-// (Paystack's NGN subunit is kobo too). Without PAYSTACK_SECRET_KEY the client
-// runs an in-process fixture, so tests never dial out.
+// --- Sales (Ada): product truth lives in PAYSTACK; orders/customers live here.
+// Without PAYSTACK_SECRET_KEY the client runs an in-process fixture, so tests
+// never dial out.
 
 function paystackHttpError(res: Response, err: any): void {
   if (err?.code === 'PAYSTACK_NOT_FOUND') {
@@ -785,8 +751,7 @@ app.get('/v1/products/:id', async (req, res) => {
   }
 });
 
-// PUT /v1/products/:id — the agent's catalogue edit: change price in chat,
-// see it change in Paystack (the owner beat from the storyboard).
+// PUT /v1/products/:id — the agent's catalogue edit (visible in Paystack too).
 app.put('/v1/products/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
@@ -796,9 +761,8 @@ app.put('/v1/products/:id', async (req, res) => {
   }
   const body = req.body || {};
 
-  // Owner-code gate — catalogue mutations are customer-visible, money-affecting
-  // and persistent in Paystack: same tier as payroll. Server-side check; the
-  // agent's judgement is never taken at face value (mirrors POST /v1/salaries).
+  // Owner-code gate — server-side check; the agent's claim is never taken at
+  // face value (same tier as payroll).
   const expectedCode = process.env.OWNER_CODE || '';
   const ownerCode = typeof body.owner_code === 'string' ? body.owner_code : '';
   if (!expectedCode) {
@@ -914,15 +878,12 @@ app.post('/v1/orders', async (req, res) => {
     );
   }
 
-  // Optional size agreed in chat (the skill's age/measure chart) — recorded on
-  // the order; Paystack has no size field, so ours is the system of record.
+  // Size agreed in chat — Paystack has no size field, so ours is the record.
   const size =
     typeof body.size === 'string' && body.size.trim() ? body.size.trim().slice(0, 24) : null;
 
   const id = `OR_${randomUUID().slice(0, 8)}`;
-  // Test hook: email 'unpaid-…' opens a window that verifies as NOT paid, so
-  // the drop-off path is demoable without a real checkout (mirrors the seed's
-  // deliberate failure-path fixtures).
+  // Test hook: email 'unpaid-…' verifies as NOT paid — drop-off demo path.
   const reference = email.startsWith('unpaid-')
     ? `unpaid-${id.slice(3)}`
     : `blsm-or-${id.slice(3)}`;
@@ -989,8 +950,8 @@ app.get('/v1/orders/:id', (req, res) => {
   res.json(envelope(true, 'Order retrieved', { order: { ...order } }));
 });
 
-// POST /v1/orders/:id/payment-link — (re)open a payment window; optional
-// amount in kobo powers the 10%-off recovery offer from the storyboard.
+// POST /v1/orders/:id/payment-link — (re)open a window; optional amount powers
+// the discounted recovery offer.
 app.post('/v1/orders/:id/payment-link', async (req, res) => {
   const db = loadDb();
   const order = db.orders.find((o) => o.id === req.params.id);
@@ -1143,10 +1104,7 @@ app.get('/v1/customers', (_req, res) => {
   res.json(envelope(true, 'Customers retrieved', { customers: db.customers.map((c) => ({ ...c })) }));
 });
 
-// --- Paystack bank balance (the OTHER pot of money) ---------------------------
-// The vending wallet is petty cash; this is the bank. Kemi could pay from one
-// and be blind to the other — this route (and check_paystack_balance) closes
-// that gap. Balance is kobo (Paystack convention).
+// --- Paystack bank balance — the OTHER pot: wallet = petty cash, this = bank.
 app.get('/v1/paystack/balance', async (_req, res) => {
   try {
     const balance = await checkBalance();
@@ -1161,20 +1119,11 @@ app.get('/v1/paystack/balance', async (_req, res) => {
   }
 });
 
-// --- Staff & salaries (Kemi: one monthly payday run, owner-code gated) --------
-// Payroll pays the FOUNDER's monthly draw. The run pays every staff member for
-// a month in one call. The OWNER_CODE must match before any money moves: the
-// server checks the code, never the agent's judgement. Every attempt is
-// recorded — `paid` (money actually moved) or `failed` (exact reason); a
-// failure is never dressed up as a payslip.
-//
-// WHERE the money comes from (SALARY_SOURCE):
-//   'wallet'   (default, current demo) — debit the vending wallet (petty cash).
-//               Needed because Paystack's test transfer channel rejects every
-//               send as of 2026-11-09 (403 "can't make the transfer to this
-//               recipient", reproduced from Paystack's own dashboard).
-//   'paystack' — real POST /transfer from the bank balance; flip .env when the
-//               channel works again (zero code changes).
+// --- Staff & salaries (Kemi: monthly payday, owner-code gated) ----------------
+// Every attempt is recorded `paid` or `failed` (exact reason) — a failure is
+// never dressed up as a payslip. SALARY_SOURCE picks the pot: 'wallet'
+// (default — Paystack's test transfer channel rejects sends, 403, 2026-11-09)
+// or 'paystack' (real POST /transfer; flip when the channel works).
 
 /** YYYY-MM, e.g. 2026-11. */
 function isValidMonth(m: string): boolean {
@@ -1365,9 +1314,7 @@ app.post('/v1/salaries', async (req, res) => {
   );
 });
 
-// --- MCP (Chord's tool surface) ---------------------------------------------
-// Stateless Streamable HTTP at POST /mcp — own Bearer auth, registered in
-// Admin -> Channels & Tools -> Custom tools (MCP). Tools self-call /v1 below.
+// --- MCP (Chord's tool surface) — registered in Admin -> Custom tools (MCP).
 mountMcp(app);
 
 // --- unknown routes --------------------------------------------------------

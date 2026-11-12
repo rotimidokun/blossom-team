@@ -13,12 +13,9 @@ function persist(db: Db): void {
 }
 
 /**
- * Merge a loaded (possibly older) file over a fresh seed so every collection the
- * current code expects exists. 2026-11-08: the live db.json predated the sales
- * feature and had no `orders`/`customers` keys — `db.orders.find(...)` threw in
- * an async handler, no response was ever written, and the MCP tool's loopback
- * fetch died on undici's 300s headers timeout ("Local vending API unreachable:
- * fetch failed"). An old file must never crash a new route.
+ * Merge a loaded (possibly older) file over a fresh seed so every collection
+ * exists — an old db.json must never crash a new route (2026-11-08: it did,
+ * and a 300s timeout disguised the crash as "server unreachable").
  */
 function normalize(loaded: Partial<Db>): Db {
   const seed = buildSeed();

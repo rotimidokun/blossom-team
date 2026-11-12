@@ -1,11 +1,10 @@
 /**
- * Live MCP probe — verifies both buckets on a running server, locally or
- * through a tunnel (pass BASE, e.g. node probe-mcp.mjs https://ngrok-url).
+ * Live MCP probe — verifies all three buckets on a running server, locally or
+ * deployed (node probe-mcp.mjs <base-url>).
  *
- * Checks: wallet account reflects the seed, /mcp lists ONLY the 7 ops tools,
- * /mcp/design lists ONLY the 3 design tools, auth rejects without a token.
- * Exit code 0 = all green; 1 = something broke. Used by the builder and as a
- * post-deploy health check (Render): node probe-mcp.mjs <base-url>.
+ * Checks: wallet fixture, /mcp = 11 ops tools only, /mcp/design = 3 design
+ * tools only, /mcp/sales = 10 sales tools only, auth rejects without a token.
+ * Exit code 0 = all green; 1 = something broke.
  */
 const base = process.argv[2] || 'http://localhost:3000';
 const KEY = process.env.VENDING_API_KEY || 'test_vending_key';

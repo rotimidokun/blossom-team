@@ -1,31 +1,14 @@
 /**
- * MCP servers for Chord — the vending API exposed as tools, SPLIT INTO TWO
- * ENDPOINTS so tool access can be scoped per teammate before Chord sees it:
+ * MCP servers for Chord — the API exposed as tools, split into THREE endpoints
+ * so each teammate gets only their bucket (Chord registers servers, not
+ * individual tools): /mcp = ops (Kemi), /mcp/design = designs (Mae),
+ * /mcp/sales = catalogue/orders/payments (Ada).
  *
- *   POST /mcp          -> ops bucket (Kemi): wallet, validation, purchases
- *   POST /mcp/design   -> design bucket (Mae): generate_design, list_designs,
- *                         list_garments
- *
- * Why two: Chord registers servers, not individual tools, and a teammate with
- * no explicit server assignment inherits every enabled server. Two endpoints =
- * two Chord server entries = each teammate is assigned only their bucket
- * (PUT /v1/teammates/{id} set_mcp_server_ids). With one endpoint, Kemi could
- * generate designs and Mae could buy airtime — no least privilege.
- *
- * Transport: Streamable HTTP, STATELESS (a fresh McpServer per request;
- * sessionIdGenerator undefined). Stateless keeps it trivially correct behind a
- * tunnel — no session affinity, no in-memory session map to lose.
- *
- * Auth: Authorization: Bearer <VENDING_API_KEY> — the token configured as the
- * server credential when Chord registers each server
- * (Admin -> Channels & Tools -> Custom tools (MCP) -> Add server).
- *
- * Architecture: tools SELF-CALL the local REST API (127.0.0.1) instead of
- * duplicating handler logic, so validation, envelopes, error codes, idempotency
- * and the generation cap have exactly ONE source of truth — app.ts.
- *
- * Governance: approve/reject design are deliberately NOT exposed — the approval
- * queue is the human's action ("Mae never publishes"; app.ts designs comment).
+ * Stateless Streamable HTTP (fresh server per request) — no session affinity,
+ * trivially correct behind tunnels. Auth: Bearer VENDING_API_KEY. Tools
+ * self-call the local REST API over loopback so validation, idempotency and
+ * error shapes have ONE source of truth (app.ts). approve/reject are
+ * deliberately not exposed — the approval queue is the human's action.
  */
 import { randomUUID } from 'node:crypto';
 import type { Express, Request, Response } from 'express';
@@ -608,9 +591,7 @@ export function mountMcp(app: Express): void {
       const server = new McpServer({ name: serverName, version: '1.0.0' });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on('close', () => {
-        // The client may abort mid-call (2026-11-05: an aborted long request
-        // surfaced as an unhandled rejection that killed the process). Close
-        // quietly — and server.ts keeps the process alive if anything slips.
+        // Close quietly on client abort (2026-11-05: an abort killed the process).
         void transport.close().catch(() => {});
         void server.close().catch(() => {});
       });

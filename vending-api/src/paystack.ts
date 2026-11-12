@@ -1,29 +1,10 @@
 /**
- * Paystack test-mode client — the business's "bank".
+ * Paystack test-mode client — the business's "bank" (api.paystack.co with a
+ * sk_test_... key; no key = in-process fixtures, so tests never dial out).
+ * Covers balance, transfers, the product catalogue and checkout.
  *
- * Real API calls to api.paystack.co using a TEST secret key (sk_test_...).
- * Test mode moves fake money through the real API, which is exactly what the
- * exercise allows: "Use test keys and made-up data only."
- *
- * Used for the pull funding path:
- *   checkBalance() -> is there money in the business's Paystack account?
- *   transfer()     -> move it to the biller (funds the vending wallet)
- *
- * STATUS (2026-11-05): the payouts gate is LIFTED. The old "starter" account
- * rejected payouts with `transfer_unavailable`; after re-onboarding as a
- * Registered Business (new key in .env), the same POST /transfer passes the
- * verification gate and now fails only with `insufficient_balance` (test
- * balance is ₦0) — i.e. the API is available, the account just needs test
- * funds. Verified by probe: GET /balance 200, POST /transferrecipient 201
- * (RCP_yab85z5ct7r24wg), POST /transfer -> insufficient_balance.
- * The demo still uses the push path (POST /v1/wallet/incoming) because the
- * test balance is empty; pull becomes the primary path once test funds exist.
- *
- * Env:
- *   PAYSTACK_SECRET_KEY  sk_test_...   (if unset, calls fail with a clear message)
- *   PAYSTACK_RECIPIENT   RCP_xxx...    (the biller's recipient code, created once)
- *
- * NOTE: tests never hit the real API — they stub this module or skip it.
+ * Env: PAYSTACK_SECRET_KEY (sk_test_...), PAYSTACK_RECIPIENT (RCP_...),
+ * PAYSTACK_STOREFRONT_URL (hosted shop).
  */
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
@@ -67,9 +48,8 @@ async function paystackCall(
     );
   }
 
-  // Diagnostic log (2026-11-08): a create_order turn hung 304s and surfaced as
-  // "Local vending API unreachable: fetch failed". Every Paystack call now logs
-  // its elapsed time and error cause so a hang is attributable to this hop.
+  // Log elapsed time + error cause so a hang is attributable to this hop
+  // (2026-11-08: a 304s hang surfaced only as "fetch failed").
   const startedAt = Date.now();
   let response: Response;
   try {
@@ -106,11 +86,8 @@ export async function checkBalance(): Promise<{ balance: number; currency: strin
     return { balance: 11600000, currency: 'NGN' }; // NGN 116,000 in kobo
   }
   const data = await paystackCall('GET', '/balance');
-  // Response: { balance, currency, ... } possibly wrapped in an array.
-  // balance is ALREADY in kobo (NGN subunit) — verified live 2026-11-09:
-  // three test sales totalling NGN 116,000 reported balance 11600000.
-  // (The old `* 100` here overstated the balance 100x — caught by the live
-  // route right after the check_paystack_balance tool shipped.)
+  // Balance is ALREADY in kobo — verified live 2026-11-09 (an earlier `* 100`
+  // overstated it 100x). Response may be wrapped in an array.
   const entry = Array.isArray(data) ? data[0] : data;
   return {
     balance: Math.round(Number(entry.balance)),
@@ -141,14 +118,11 @@ export async function transfer({
   reference,
   reason
 }: TransferArgs): Promise<TransferResult> {
-  // NOTE (2026-11-09): Paystack's test transfer channel currently rejects every
-  // send to our (active, correct) recipient — "Sorry, We can't make the transfer
-  // to this recipient at the moment" (403, code unknown), reproduced from the
-  // Paystack dashboard itself. Payroll therefore pays from the vending wallet
-  // (SALARY_SOURCE=wallet); flip to 'paystack' when the channel works again.
-  // No key (tests / local fixture): succeed in-process so the payday flow is
-  // testable without dialing out. Test hook: MOCK_TRANSFER_FAIL=1 simulates an
-  // empty balance so the failure path (recorded, never a fake payslip) is covered.
+  // NOTE (2026-11-09): the test transfer channel rejects every send (403,
+  // "can't make the transfer to this recipient", reproduced from Paystack's own
+  // dashboard) — payroll uses SALARY_SOURCE=wallet until it works again.
+  // No key = in-process success so tests never dial out; MOCK_TRANSFER_FAIL=1
+  // covers the failure path (recorded, never a fake payslip).
   if (mockMode()) {
     if (process.env.MOCK_TRANSFER_FAIL === '1') {
       throw fail(
