@@ -1051,6 +1051,21 @@ app.post('/v1/orders/:id/verify', async (req, res) => {
     };
     db.customers.push(customer);
   }
+
+  // Stock: a verified payment sells one unit (capped at 0; unlimited/null
+  // untouched). Best-effort — a stock-update failure never fails an order
+  // that Paystack already confirmed as paid.
+  try {
+    const product = await getProduct(order.product_id);
+    if (typeof product.quantity === 'number' && product.quantity > 0) {
+      await updateProduct(order.product_id, { quantity: Math.max(0, product.quantity - 1) });
+    }
+  } catch (err) {
+    console.warn(
+      `[stock] decrement failed for product ${order.product_id} (order ${order.id}): ${(err as Error).message}`
+    );
+  }
+
   saveDb(db);
   res.json(
     envelope(true, 'Payment confirmed — order paid', {

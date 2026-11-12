@@ -690,6 +690,33 @@ test('verify payment: paid -> order paid + customer recorded (and stays idempote
   assert.equal(flagged.http, 409, 'paid orders never change');
 });
 
+test('a verified payment decrements product stock by one (capped at 0)', async () => {
+  const before = await call('GET', '/v1/products/2880906');
+  const qtyBefore = before.json.data.product.quantity as number;
+
+  const created = await call('POST', '/v1/orders', {
+    body: { product_id: 2880906, customer_name: 'Stock Check', customer_email: 'stock@example.test' }
+  });
+  assert.equal(created.http, 201);
+  const verified = await call('POST', `/v1/orders/${created.json.data.order.id}/verify`);
+  assert.equal(verified.json.data.paid, true);
+
+  const after = await call('GET', '/v1/products/2880906');
+  assert.equal(after.json.data.product.quantity, qtyBefore - 1, 'stock drops by one on a paid order');
+
+  // Cap: drive stock to 0, sell again — never negative.
+  const zeroed = await call('PUT', '/v1/products/2880906', {
+    body: { owner_code: 'flowerpower', quantity: 0 }
+  });
+  assert.equal(zeroed.http, 200);
+  const second = await call('POST', '/v1/orders', {
+    body: { product_id: 2880906, customer_name: 'Stock Check 2', customer_email: 'stock2@example.test' }
+  });
+  await call('POST', `/v1/orders/${second.json.data.order.id}/verify`);
+  const final = await call('GET', '/v1/products/2880906');
+  assert.equal(final.json.data.product.quantity, 0, 'stock never goes below zero');
+});
+
 test('drop-off path: not paid -> lead -> recovery offer -> new window', async () => {
   const created = await call('POST', '/v1/orders', {
     body: { product_id: 2880907, customer_name: 'Ngozi', customer_email: 'unpaid-ngozi@example.test' }
